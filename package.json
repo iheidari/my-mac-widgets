@@ -1,15 +1,18 @@
 {
   "name": "claude-statistics-mac-widget",
-  "version": "1.0.0",
-  "description": "A macOS desktop widget showing your Claude Code usage statistics, built from local ~/.claude JSONL files plus live OpenTelemetry metrics.",
+  "version": "2.0.0",
+  "description": "A reusable macOS Übersicht widget host: one local helper serving many widget data providers, starting with Claude Code usage statistics.",
   "type": "commonjs",
   "bin": {
-    "claude-stats": "src/cli.js"
+    "widget-helper": "src/cli.js"
   },
   "scripts": {
     "start": "node src/cli.js serve",
+    "list": "node src/cli.js list",
     "parse": "node src/cli.js parse",
     "print": "node src/cli.js print",
+    "deploy": "./scripts/deploy.sh",
+    "new-widget": "./scripts/new-widget.sh",
     "test": "node test/run.js"
   },
   "engines": {

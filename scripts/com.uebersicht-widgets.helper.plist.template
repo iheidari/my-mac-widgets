@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.claude-stats.helper</string>
+    <string>com.uebersicht-widgets.helper</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -12,7 +12,8 @@
         <string>serve</string>
     </array>
 
-    <!-- Keep the helper alive at login and restart it if it crashes. -->
+    <!-- Keep the helper alive at login and restart it if it crashes. One
+         service backs every widget in widgets/. -->
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -25,7 +26,7 @@
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>CLAUDE_STATS_PORT</key>
+        <key>WIDGET_HOST_PORT</key>
         <string>__PORT__</string>
     </dict>
 </dict>
