@@ -1,4 +1,4 @@
 node_modules/
 *.log
 .DS_Store
-src/pricing.json
+src/providers/claude-stats/pricing.json

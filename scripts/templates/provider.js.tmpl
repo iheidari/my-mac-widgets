@@ -1,0 +1,47 @@
+'use strict';
+
+// __TITLE__ — data source for the __ID__ widget.
+//
+// The core discovers this folder automatically and serves collect()'s return
+// value at GET /stats/__ID__, cached for ttlMs with in-flight de-duplication.
+// Nothing outside this folder needs to change.
+
+module.exports = {
+  id: '__ID__',
+  title: '__TITLE__',
+
+  // How long one payload is reused. Widgets poll every few seconds, so set this
+  // to how often the underlying data actually changes — not how often you look.
+  ttlMs: 60_000,
+
+  // Return the JSON the widget renders. Degrade to nulls rather than throwing:
+  // a thrown error becomes a 500 and the widget shows its offline state.
+  async collect() {
+    return {
+      value: 42,
+      label: 'placeholder',
+      ok: true,
+      generatedAt: new Date().toISOString(),
+    };
+  },
+
+  // Optional: extra HTTP endpoints, e.g. to receive pushed data.
+  // routes: [
+  //   {
+  //     method: 'POST',
+  //     path: '/__ID__/ingest',
+  //     async handler(req, res, { sendJson, readBody }) {
+  //       const raw = await readBody(req);
+  //       sendJson(res, 200, { ok: true, bytes: raw.length });
+  //     },
+  //   },
+  // ],
+
+  // Optional: how `widget-helper print __ID__` renders this payload.
+  print(data) {
+    console.log(`\n  __TITLE__`);
+    console.log('  ' + '─'.repeat(34));
+    console.log(`  value   ${data.value}`);
+    console.log(`  label   ${data.label}\n`);
+  },
+};

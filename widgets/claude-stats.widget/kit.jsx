@@ -1,0 +1,1 @@
+../../widget-kit/kit.jsx

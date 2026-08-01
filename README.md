@@ -1,10 +1,32 @@
-# Claude Statistics — macOS Desktop Widget
+# macOS Desktop Widgets — Übersicht Widget Host
 
-A desktop widget for your Mac that shows your **Claude Code** usage statistics —
-sessions, messages, tokens, estimated cost, streaks, peak hour, and favorite
-model — right on your wallpaper.
+A small, reusable host for [Übersicht](https://tracesof.net/uebersicht/) desktop
+widgets: **one** local Node helper serves **many** widgets, and a shared widget
+kit means a new widget is a data function plus a layout — not another 300 lines
+of CSS.
 
-It uses **both** approaches you asked for:
+The widget it ships with shows your **Claude Code** usage statistics — sessions,
+messages, tokens, estimated cost, streaks, peak hour, favorite model, and live
+plan-limit bars — right on your wallpaper.
+
+**Adding a widget is two commands:**
+
+```bash
+./scripts/new-widget.sh weather        # scaffolds provider + widget
+./scripts/deploy.sh weather            # copies it into Übersicht
+```
+
+`new-widget.sh` writes `src/providers/weather/index.js` (fill in `collect()`) and
+`widgets/weather.widget/index.jsx` (fill in the layout). The helper discovers the
+provider automatically and serves it at `/stats/weather` — no registration, no
+edits to the server, no new launchd service.
+
+---
+
+## How it fits together
+
+The Claude Code widget fuses **three** independent sources, which is a good
+illustration of what a provider can do:
 
 1. **Parses your local files** — `~/.claude/projects/**/*.jsonl`,
    `~/.claude/history.jsonl`, and `~/.claude/stats-cache.json`. This is the only
@@ -13,16 +35,19 @@ It uses **both** approaches you asked for:
    `claude_code.token.usage`, `claude_code.cost.usage`, `claude_code.session.count`,
    `claude_code.active_time.total`, etc. The helper ingests them live so the
    widget updates as you work.
+3. **Reads your plan usage limits** — the live session and weekly rate-limit
+   windows, so the widget can show how much of each you have left.
 
 ```
-┌───────────────────────────┐        ┌──────────────────────────┐
-│  ~/.claude/*.jsonl         │──parse─▶│  helper service          │
-│  history.jsonl             │        │  (Node, zero deps)       │
-│  stats-cache.json          │        │                          │
-└───────────────────────────┘        │   GET  /stats  ──────────┼──▶ Übersicht widget
-                                      │   POST /v1/metrics ◀─────┼── Claude Code (OTEL)
-Claude Code ──OTEL http/json─────────▶│                          │
-                                      └──────────────────────────┘
+src/providers/claude-stats/  ─┐
+  ~/.claude/*.jsonl  (parse)  │      ┌──────────────────────────────┐
+  OTLP metrics       (push)   ├─────▶│  widget helper               │
+  /api/oauth/usage   (fetch)  │      │  (Node, zero deps, one port) │
+                             ─┘      │                              │
+src/providers/<yours>/  ─────────────▶│  GET /stats/<id> ───────────┼──▶ widgets/<id>.widget
+                                      │  GET /stats      (default)  │      + widget-kit/
+                                      │  POST /v1/metrics ◀─────────┼── Claude Code (OTEL)
+                                      └──────────────────────────────┘
 ```
 
 The helper is **pure Node.js with no dependencies** — nothing to `npm install`.
@@ -46,7 +71,7 @@ cd claude-statistics-mac-widget
 # See your stats right now in the terminal (no service needed):
 node src/cli.js print
 
-# Install: runs the helper at login + copies the widget into Übersicht
+# Install: runs the helper at login + copies every widget into Übersicht
 ./scripts/install.sh
 
 # Turn on live telemetry from Claude Code (optional but recommended):
@@ -59,28 +84,102 @@ top-left of your desktop.
 
 ---
 
-## Components
+## Layout
+
+Everything reusable lives in `src/core/` and `widget-kit/`; everything specific
+to one data source lives in its own provider folder.
 
 | Path | What it is |
 |------|-----------|
-| `src/cli.js` | CLI: `serve` (default), `print`, `parse`, `help` |
-| `src/parser/` | Defensive JSONL parser + statistics engine |
-| `src/pricing.js` | Per-model cost estimation (Opus/Sonnet/Haiku/Fable, cache tokens) |
-| `src/telemetry/otlpReceiver.js` | OTLP **http/json** metrics receiver |
-| `src/server.js` | HTTP server: `/stats`, `/telemetry`, `/health`, `POST /v1/metrics` |
-| `widget/claude-stats.widget/` | The Übersicht desktop widget |
-| `scripts/install.sh` | launchd service + widget install |
+| `src/core/server.js` | Generic HTTP host — routes are derived from the registry |
+| `src/core/registry.js` | Discovers `src/providers/*/`, defines the provider contract |
+| `src/core/cache.js` | TTL memoization with in-flight de-duplication |
+| `src/core/config.js` | Port, host, default provider, allow/deny lists |
+| `src/cli.js` | CLI: `serve` (default), `list`, `print`, `parse`, `help` |
+| `src/providers/claude-stats/` | The Claude Code data source (parser, telemetry, pricing, plan limits) |
+| `widgets/<id>.widget/` | One Übersicht widget per folder |
+| `widget-kit/kit.jsx` | Shared CSS + `Card`/`Tile`/`Bar`/`Section` components + formatters |
+| `scripts/new-widget.sh` | Scaffolds a provider + widget from `scripts/templates/` |
+| `scripts/deploy.sh` | Copies widgets into Übersicht |
+| `scripts/install.sh` | launchd service + deploy |
 | `scripts/enable-telemetry.sh` | Adds the OTEL env vars to your shell rc |
+
+---
+
+## Writing a widget
+
+```bash
+./scripts/new-widget.sh weather --title "Weather"
+```
+
+**1. The provider** (`src/providers/weather/index.js`) — anything `collect()`
+returns is served at `/stats/weather`, cached for `ttlMs` with concurrent
+callers de-duplicated into one fetch:
+
+```js
+module.exports = {
+  id: 'weather',
+  title: 'Weather',
+  ttlMs: 600_000,
+  async collect() {
+    return { tempC: 18, condition: 'cloudy', generatedAt: new Date().toISOString() };
+  },
+  // optional: extra endpoints, e.g. to receive pushed data
+  routes: [{ method: 'POST', path: '/weather/ingest', async handler(req, res, ctx) { … } }],
+  // optional: how `widget-helper print weather` renders it
+  print(data) { console.log(data.tempC); },
+};
+```
+
+That's the whole contract. Nothing registers it — the folder *is* the
+registration. `widget-helper list` shows what was found, and a provider that
+fails to load is reported at `/providers` instead of taking the host down.
+
+**2. The widget** (`widgets/weather.widget/index.jsx`) — the kit supplies the
+polling command, the frosted-card chrome, and the pieces:
+
+```jsx
+import { statsCommand, parseOutput, baseCss, Card, Grid, Tile, Offline } from "./kit.jsx";
+
+export const command = statsCommand("weather");
+export const refreshFrequency = 10000;
+export const className = `top: 40px; left: 380px; width: 320px; ${baseCss}`;
+
+export const render = ({ output }) => {
+  const { offline, data } = parseOutput(output);
+  if (offline) return <Offline title="Weather" />;
+  return (
+    <Card title="Weather" live>
+      <Grid columns={2}>
+        <Tile value={`${data.tempC}°`} label="Now" />
+        <Tile value={data.condition} label="Sky" />
+      </Grid>
+    </Card>
+  );
+};
+```
+
+Kit exports: `statsCommand`, `parseOutput`, `baseCss`, `Card`, `Grid`, `Tile`,
+`Bar`, `Section`, `Foot`, `Offline`, `Message`, and the formatters `fmt`, `usd`,
+`hour`, `relTime`, `pctColor`.
+
+`kit.jsx` in each widget folder is a symlink to `widget-kit/kit.jsx`; `deploy.sh`
+copies with `-L` so the deployed bundle is self-contained (Übersicht bundles each
+widget folder independently).
+
+**3. Deploy:** `./scripts/deploy.sh weather`. Übersicht runs the *copy* in its
+widgets folder, so an edit in the repo is invisible until you deploy.
 
 ---
 
 ## The CLI
 
 ```
-claude-stats serve     Start the helper (serves /stats, receives /v1/metrics). Default.
-claude-stats print     Human-readable summary in the terminal.
-claude-stats parse     Full parsed stats as JSON.
-claude-stats help      Usage.
+widget-helper serve              Start the helper (serves every provider). Default.
+widget-helper list               List registered providers.
+widget-helper print [provider]   Human-readable summary.
+widget-helper parse [provider]   Full payload as JSON.
+widget-helper help               Usage.
 ```
 
 Run without installing anything:
@@ -107,9 +206,17 @@ node src/cli.js print
 
 ---
 
-## The `/stats` endpoint
+## Endpoints
 
-`GET http://127.0.0.1:4318/stats` returns everything the widget needs:
+| Route | What it returns |
+|-------|-----------------|
+| `GET /stats/<id>` | One provider's payload |
+| `GET /stats` | The default provider (`claude-stats`), for widgets written before ids |
+| `GET /providers` | The registry: ids, TTLs, routes, and anything that failed to load |
+| `GET /health` | Liveness + provider ids |
+| *provider routes* | e.g. `POST /v1/metrics`, `GET /limits`, `GET /telemetry` from `claude-stats` |
+
+`GET http://127.0.0.1:4318/stats/claude-stats` returns everything that widget needs:
 
 ```jsonc
 {
@@ -139,7 +246,8 @@ node src/cli.js print
 }
 ```
 
-Parsed file results are cached for 30s (`CLAUDE_STATS_TTL_MS`) so polling is cheap.
+Each provider payload is cached for its `ttlMs` (30s here, `CLAUDE_STATS_TTL_MS`), and
+concurrent pollers share one fetch, so polling every 10s is cheap.
 
 ---
 
@@ -237,42 +345,69 @@ curl -s http://127.0.0.1:4318/limits | node -e 'process.stdin.on("data",d=>conso
 > its reset time.
 
 If the token has expired, the helper reports that (`run any Claude Code command
-to refresh it`) instead of failing silently — it does **not** implement token
-refresh itself.
+to refresh it`) instead of failing silently, and keeps showing the last good
+reading dimmed and time-stamped for up to two hours.
+
+Renewing the token is Claude Code's job by default — the helper will not touch
+your credentials unless you set `CLAUDE_STATS_AUTO_REFRESH=1`. With that opted
+in, it redeems the stored refresh token itself and writes the rotated credential
+back to the Keychain. That is off by default deliberately: Anthropic invalidates
+the old refresh token the instant a new one is issued, so a write-back that
+fails — or that races Claude Code doing its own refresh — can log Claude Code
+out and force you to sign in again.
 
 ---
 
 ## Configuration
 
+**Host** (applies to every widget):
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `WIDGET_HOST_PORT` | `4318` | Helper listen port (widgets + OTEL must match) |
+| `WIDGET_HOST_HOST` | `127.0.0.1` | Helper bind address |
+| `WIDGET_HOST_DEFAULT_PROVIDER` | `claude-stats` | Which provider `GET /stats` serves |
+| `WIDGET_HOST_PROVIDERS` | (all) | Comma-separated allow-list of provider ids |
+| `WIDGET_HOST_DISABLE` | (none) | Comma-separated deny-list of provider ids |
+
+`CLAUDE_STATS_PORT` / `CLAUDE_STATS_HOST` still work as fallbacks.
+
+**The `claude-stats` provider:**
+
 | Env var | Default | Meaning |
 |---------|---------|---------|
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Where to read the JSONL data from |
-| `CLAUDE_STATS_PORT` | `4318` | Helper listen port (widget + OTEL must match) |
-| `CLAUDE_STATS_HOST` | `127.0.0.1` | Helper bind address |
 | `CLAUDE_STATS_TTL_MS` | `30000` | File-parse cache lifetime |
 | `CLAUDE_STATS_PLAN_LIMITS` | (on) | Set to `off` to disable live plan-limit probing entirely |
 | `CLAUDE_STATS_LIMITS_TTL_MS` | `180000` | Plan-limit refresh interval (min 180s — enforced) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Provide the OAuth token yourself instead of reading Keychain |
+| `CLAUDE_STATS_LIMITS_ERROR_TTL_MS` | `20000` | Back-off before retrying after a failed plan-limit poll |
 | `CLAUDE_STATS_USER_AGENT` | `claude-code/<detected>` | User-Agent sent to the usage endpoint |
+| `CLAUDE_STATS_AUTO_REFRESH` | (off) | Set to `1` to let the helper renew and re-store the OAuth token — see the warning above |
+| `CLAUDE_STATS_OAUTH_CLIENT_ID` | (Claude Code's) | OAuth client id used when auto-refresh redeems the refresh token |
 
-If you change the port, update `PORT` at the top of
-`widget/claude-stats.widget/index.jsx` too.
+If you change the port, update `DEFAULT_PORT` at the top of `widget-kit/kit.jsx`
+(every widget reads it from there) and re-run `./scripts/deploy.sh`.
 
-**Custom pricing:** drop a `src/pricing.json` (same shape as the `PRICING`
-table in `src/pricing.js`) to override or add model prices.
+**Custom pricing:** drop a `src/providers/claude-stats/pricing.json` (same shape
+as the `PRICING` table in `pricing.js`) to override or add model prices.
 
 ---
 
 ## Uninstall
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.claude-stats.helper.plist
-rm ~/Library/LaunchAgents/com.claude-stats.helper.plist
+launchctl unload ~/Library/LaunchAgents/com.uebersicht-widgets.helper.plist
+rm ~/Library/LaunchAgents/com.uebersicht-widgets.helper.plist
 rm -rf "$HOME/Library/Application Support/Übersicht/widgets/claude-stats.widget"
 ```
 
 Remove the telemetry block from your shell rc file (marked with
-`claude-statistics-mac-widget`).
+`uebersicht-widgets`).
+
+To remove a single widget, delete its `src/providers/<id>/` and
+`widgets/<id>.widget/` folders and its copy in the Übersicht widgets directory —
+or keep the code and hide it with `WIDGET_HOST_DISABLE=<id>`.
 
 ---
 
@@ -281,7 +416,7 @@ Remove the telemetry block from your shell rc file (marked with
 - **The JSONL schema is internal to Claude Code and can change between releases.**
   The parser is deliberately defensive (it tolerates missing fields and skips
   malformed lines), but a future format change may need a small update to
-  `src/parser/aggregate.js`.
+  `src/providers/claude-stats/parser/aggregate.js`.
 - **Costs are estimates.** They use public list pricing and don't know about
   subscription plans, batch discounts, or promotional rates.
 - The helper binds to `127.0.0.1` only — nothing is exposed off your machine.
@@ -292,4 +427,9 @@ Remove the telemetry block from your shell rc file (marked with
 
 ```bash
 node test/run.js     # unit + end-to-end tests (no network, no deps)
+node src/cli.js list # what the registry found
 ```
+
+The suite is hermetic — no network, no dependencies, and it stubs the Keychain
+lookup so it behaves the same on a machine that has a live Claude Code token as
+on one that doesn't.

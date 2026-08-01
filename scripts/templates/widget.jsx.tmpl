@@ -1,0 +1,55 @@
+// __TITLE__ — Übersicht desktop widget.
+//
+// Reads GET /stats/__ID__ from the local helper (src/providers/__ID__/).
+// Deploy with: ./scripts/deploy.sh __ID__
+
+import {
+  statsCommand,
+  parseOutput,
+  baseCss,
+  fmt,
+  relTime,
+  Card,
+  Grid,
+  Tile,
+  Foot,
+  Section,
+  Bar,
+  Offline,
+  Message,
+} from "./kit.jsx";
+
+const TITLE = "__TITLE__";
+
+export const command = statsCommand("__ID__");
+
+export const refreshFrequency = 10000; // 10s
+
+// Position and size are per-widget; everything else comes from the kit.
+export const className = `
+  top: 40px;
+  left: 380px;
+  width: 320px;
+  ${baseCss}
+`;
+
+export const render = ({ output }) => {
+  const { offline, error, data } = parseOutput(output);
+  if (offline) return <Offline title={TITLE} />;
+  if (error) return <Message title={TITLE}>{error}</Message>;
+
+  return (
+    <Card title={TITLE} live={data.ok} dotTitle={data.ok ? "Live" : "Stale"}>
+      <Grid columns={2}>
+        <Tile value={fmt(data.value)} label="Value" />
+        <Tile value={data.label} label="Label" />
+      </Grid>
+
+      <Section title="Detail">
+        <Bar label="Example" percent={data.value} value={`${data.value}%`} caption="replace me" />
+      </Section>
+
+      <Foot left={relTime(data.generatedAt, "updated")} right="__ID__" />
+    </Card>
+  );
+};
