@@ -65,8 +65,8 @@ The helper is **pure Node.js with no dependencies** — nothing to `npm install`
 ## Quick start
 
 ```bash
-git clone <this-repo> claude-statistics-mac-widget
-cd claude-statistics-mac-widget
+git clone <this-repo> my-mac-widgets
+cd my-mac-widgets
 
 # See your stats right now in the terminal (no service needed):
 node src/cli.js print

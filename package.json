@@ -1,5 +1,5 @@
 {
-  "name": "claude-statistics-mac-widget",
+  "name": "my-mac-widgets",
   "version": "2.0.0",
   "description": "A reusable macOS Übersicht widget host: one local helper serving many widget data providers, starting with Claude Code usage statistics.",
   "type": "commonjs",
