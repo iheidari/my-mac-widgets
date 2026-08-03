@@ -86,6 +86,11 @@ export const baseCss = `
 
   --wk-muted: #9AA0AA;
   --wk-accent: #C4B5FD;
+  /* Binary good/bad states, for widgets that report a condition rather than a
+     percentage (pctColor covers the percentage ramp). Same values as .wk-live
+     and pctColor's red, so a widget's tiles match its status dot. */
+  --wk-ok: #4ADE80;
+  --wk-bad: #EF4444;
 
   .wk-card {
     background: rgba(20, 22, 28, 0.72);
