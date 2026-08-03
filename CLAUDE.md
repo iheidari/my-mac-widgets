@@ -83,7 +83,9 @@ A provider whose payload mixes cadences opts out with **`ttlMs: 0`**, which disa
 
 ### The widget kit
 
-`widget-kit/kit.jsx` holds the shared chrome: `baseCss` (all `wk-` prefixed), `Card`/`Grid`/`Tile`/`Bar`/`Section`/`Foot`/`Offline`/`Message`, the formatters (`fmt`, `usd`, `hour`, `relTime`, `pctColor`), and `statsCommand()`/`parseOutput()` which build the `curl` poll and normalize its output. Widgets should contribute only positioning, layout, and their own data-shaping helpers.
+`widget-kit/kit.jsx` holds the shared chrome: `baseCss` (all `wk-` prefixed), `Card`/`Grid`/`Tile`/`Bar`/`Section`/`Foot`/`Offline`/`Message`, the formatters (`fmt`, `usd`, `hour`, `relTime`, `pctColor`), `openUrl()` for click handlers, and `statsCommand()`/`parseOutput()` which build the `curl` poll and normalize its output. Widgets should contribute only positioning, layout, and their own data-shaping helpers.
+
+`openUrl()` wraps `run` from the `uebersicht` module — Übersicht marks that module external when bundling (`server.js`: `bundle.external('uebersicht')`) and supplies it at runtime, so the import resolves from the shared kit exactly as it would from a widget's own file. It shells out, so the URL is **single-quoted, with embedded quotes escaped**, never interpolated bare: these strings come back from an API. Pair it with the `wk-click` class for the cursor and hover highlight.
 
 Each `widgets/<id>.widget/kit.jsx` is a **symlink** to `widget-kit/kit.jsx`; `deploy.sh` copies with `cp -RL` so the deployed bundle is self-contained. This matters because Übersicht bundles each widget folder independently (browserify + babel, JSX pragma `html` = `React.createElement`, exposed as a true global). Two consequences:
 
@@ -138,11 +140,40 @@ The access token lives ~8h and **only Claude Code renews it**. Go a day without 
 
 `writeBackCredential()` avoids two ways to lose the credential outright: the Keychain branch passes the secret on **stdin** (`-w` last, no value, payload written twice for `security`'s confirm prompt) rather than in argv where any local process can read it out of `ps`; the file branch writes a temp file and `rename()`s it, because a truncating in-place write interrupted mid-flight leaves an empty `.credentials.json` with the refresh token already rotated server-side.
 
+## The `linear-stats` provider
+
+Per-project ticket counts from Linear's **documented** GraphQL API (`api.linear.app/graphql`) — two requests per refresh, no SDK, no `linearis` subprocess. The CLI was rejected on facts, not taste: it stores an encrypted token we cannot reuse, and its issue payload omits `state.type`, which is the field the backlog column is *defined* by.
+
+### The three columns are not symmetrical — this is the part to get right
+
+| Column | Rule | Why it is like that |
+|--------|------|---------------------|
+| `review` | `state.name` matches `In Review` (case-insensitive) | Linear types **both** `In Progress` and `In Review` as `started`, so the type cannot distinguish them. Name-matching is the only option. |
+| `backlog` | `state.type` is `backlog` **or** `unstarted` | `backlog` is Linear's Backlog page; `unstarted` is the `Todo` status, which Linear files under Active but the user counts as backlog. Both, deliberately. |
+| `ready` | a **backlog** issue carrying the `Ready to play` label | A strict subset of `backlog`, never a third independent bucket — a labelled `In Review` issue must not inflate it. |
+
+Because `review` matches by name, renaming that status in Linear would silently report zero. `aggregate()` therefore also checks the workspace's `workflowStates` and returns `reviewStateKnown: false` when nothing matches, which the widget renders as a warning. Keep that — a zero the user cannot explain is worse than no number.
+
+Completed, canceled and duplicate work is excluded server-side by the `state.type` filter. Projects whose status type is `completed`/`canceled` get no row, and their issues are dropped rather than reappearing under the `— no project` bucket (which exists only for issues with a genuinely null project, and is hidden when empty). Rows are sorted busiest-first: backlog desc, review desc, name.
+
+### Credential
+
+`LINEAR_API_KEY` env → macOS Keychain (`security find-generic-password -s linear-stats`). No file fallback: Linear writes no credential to disk for us to read, so a file would be one we invented and one more copy of a full-permission secret. **No key found ⇒ no network call**, `available: false` — preserve this. `install.sh` offers to store one (prompt is `read -rs`, and the secret goes to `security` on **stdin**, not argv).
+
+A Linear personal API key carries the user's full workspace permissions — Linear has no read-only variant. This provider only ever issues queries; keep it that way.
+
+### Caching
+
+`ttlMs: 0` (host in-flight de-dup only) plus an internal adaptive cache, same shape as `planLimits.js`: 5-minute success TTL, 60s for transient failures, and the **full** window for auth failures and 429s so a revoked key isn't retried every poll. `lastGood` retains the previous counts and a failed poll returns them with `stale: true` + `staleSince`, rendered dimmed. Unlike the plan-limit bars there is deliberately **no** `STALE_MAX_MS` cap: a ticket count from this morning is still a true statement about this morning, whereas a usage percentage from before a window reset is actively wrong.
+
+`PAGE_SIZE` (50) and `labels(first: 20)` are held below the API's maxima on purpose — Linear rejects requests over a complexity budget that counts nested selections, and `linearis` trips it at 100.
+
 ## Conventions
 
 - All source uses `'use strict'` CommonJS. Match the existing terse, comment-the-why style.
 - Host env overrides: `WIDGET_HOST_PORT`, `WIDGET_HOST_HOST`, `WIDGET_HOST_DEFAULT_PROVIDER`, `WIDGET_HOST_PROVIDERS` (allow-list), `WIDGET_HOST_DISABLE` (deny-list). `CLAUDE_STATS_PORT`/`CLAUDE_STATS_HOST` remain as fallbacks.
 - `claude-stats` env overrides: `CLAUDE_CONFIG_DIR` (relocates `~/.claude`), `CLAUDE_STATS_TTL_MS`, `CLAUDE_STATS_LIMITS_TTL_MS`, `CLAUDE_STATS_LIMITS_ERROR_TTL_MS`, `CLAUDE_STATS_PLAN_LIMITS=off`, `CLAUDE_STATS_USER_AGENT`, `CLAUDE_STATS_AUTO_REFRESH`, `CLAUDE_STATS_OAUTH_CLIENT_ID`. Tests drive the parser by pointing `CLAUDE_CONFIG_DIR` at a temp fixture. New providers should namespace their own vars the same way.
 - `system-status` env overrides: `SYSTEM_STATUS_DISK_VOLUME`, `SYSTEM_STATUS_PROBE_URL`, `SYSTEM_STATUS_PROBE_INTERVAL_MS`, `SYSTEM_STATUS_PROBE_OFFLINE_INTERVAL_MS`, `SYSTEM_STATUS_RETRY_DELAY_MS`, `SYSTEM_STATUS_RETRIES`, `SYSTEM_STATUS_IDLE_STOP_MS`.
+- `linear-stats` env overrides: `LINEAR_API_KEY`, `LINEAR_STATS=off`, `LINEAR_STATS_TTL_MS`, `LINEAR_STATS_ERROR_TTL_MS`, `LINEAR_STATS_REVIEW_STATES` (comma-separated state names), `LINEAR_STATS_READY_LABEL`.
 - The launchd service is `com.uebersicht-widgets.helper` (logs in `~/Library/Logs/uebersicht-widgets/`). `install.sh` removes the legacy `com.claude-stats.helper` so the two can't fight over the port.
 - The server binds `127.0.0.1` only and reads local files/credentials — treat it as a localhost-only tool, not a network service.

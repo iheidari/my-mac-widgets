@@ -725,6 +725,227 @@ childProcess.execFileSync = (file, args, opts) => {
     }
   });
 
+  console.log('\nLinear stats');
+
+  // The counting rules live in a pure function precisely so they can be checked
+  // against a fixture rather than against whatever the workspace happens to hold
+  // today. Shapes mirror the GraphQL selection in linear.js.
+  const { aggregate } = require('../src/providers/linear-stats/aggregate');
+
+  const ln = {
+    project: (id, name, statusType) => ({ id, name, url: `https://linear.app/x/project/${id}`, status: { type: statusType || 'planned' } }),
+    issue: (projectId, stateName, stateType, labels) => ({
+      id: `i-${Math.random()}`,
+      state: { name: stateName, type: stateType },
+      project: projectId ? { id: projectId } : null,
+      labels: { nodes: (labels || []).map((name) => ({ name })) },
+    }),
+  };
+
+  const READY = 'Ready to play';
+  const workspace = {
+    projects: [ln.project('p1', 'Fexi'), ln.project('p2', 'Cadence'), ln.project('p3', 'Tubekeep'), ln.project('p4', 'Old', 'completed')],
+    states: [
+      { name: 'Backlog', type: 'backlog' },
+      { name: 'Todo', type: 'unstarted' },
+      { name: 'In Progress', type: 'started' },
+      { name: 'In Review', type: 'started' },
+    ],
+    issues: [
+      ln.issue('p1', 'Backlog', 'backlog', [READY]),
+      ln.issue('p1', 'Backlog', 'backlog', ['bug']),
+      ln.issue('p1', 'Todo', 'unstarted', [READY]),
+      ln.issue('p1', 'In Review', 'started', []),
+      ln.issue('p1', 'In Progress', 'started', [READY]),
+      ln.issue('p3', 'Backlog', 'backlog', []),
+      ln.issue('p4', 'Backlog', 'backlog', [READY]), // completed project — no row
+      ln.issue(null, 'Todo', 'unstarted', []), // no project
+      ln.issue('p1', 'Done', 'completed', [READY]), // never counted
+    ],
+  };
+
+  const agg = aggregate(workspace, {});
+  const rowFor = (name) => agg.rows.find((r) => r.name === name);
+
+  await test('counts review, backlog and ready per project', () => {
+    const fexi = rowFor('Fexi');
+    assert.strictEqual(fexi.review, 1, 'only the In Review issue');
+    assert.strictEqual(fexi.backlog, 3, 'two Backlog + one Todo');
+    assert.strictEqual(fexi.ready, 2, 'labelled backlog issues only');
+  });
+
+  await test('Todo (unstarted) counts toward the backlog column', () => {
+    // The user reads Linear's Todo as backlog even though Linear files it under
+    // Active — so `unstarted` is counted alongside `backlog`.
+    const unassigned = rowFor('— no project');
+    assert.strictEqual(unassigned.backlog, 1);
+  });
+
+  await test('ready is a subset of backlog, never a third bucket', () => {
+    // p1 has an In Progress and a Done issue both carrying the label; neither
+    // may lift `ready` above the number of labelled backlog issues.
+    assert.ok(rowFor('Fexi').ready <= rowFor('Fexi').backlog);
+  });
+
+  await test('completed and canceled work is excluded entirely', () => {
+    assert.strictEqual(rowFor('Fexi').review + rowFor('Fexi').backlog, 4, 'the Done issue is not counted');
+  });
+
+  await test('a project with no issues still gets a zero row', () => {
+    const cadence = rowFor('Cadence');
+    assert.ok(cadence, 'Cadence is listed');
+    assert.deepStrictEqual([cadence.review, cadence.backlog, cadence.ready], [0, 0, 0]);
+  });
+
+  await test('a completed project gets no row and its issues are dropped', () => {
+    assert.strictEqual(rowFor('Old'), undefined, 'no row for a completed project');
+    // Only Fexi's two labelled backlog issues remain: the completed project's
+    // third one would push this to 3 if closed work leaked into the counts.
+    assert.strictEqual(agg.totals.ready, 2, "the completed project's labelled issue is not in the totals");
+  });
+
+  await test('issues with no project land in one bucket, counted apart from projects', () => {
+    assert.ok(rowFor('— no project'), 'bucket present when non-empty');
+    assert.strictEqual(agg.totals.projects, 3, 'the bucket is not counted as a project');
+  });
+
+  await test('the no-project bucket is absent when nothing is in it', () => {
+    const clean = aggregate({ ...workspace, issues: workspace.issues.filter((i) => i.project) }, {});
+    assert.strictEqual(clean.rows.find((r) => r.name === '— no project'), undefined);
+  });
+
+  await test('rows are ordered busiest-first', () => {
+    const backlogs = agg.rows.map((r) => r.backlog);
+    assert.deepStrictEqual(backlogs, [...backlogs].sort((a, b) => b - a), 'backlog descending');
+  });
+
+  await test('totals are the sum of the rows', () => {
+    const sum = (k) => agg.rows.reduce((n, r) => n + r[k], 0);
+    assert.deepStrictEqual(agg.totals, { review: sum('review'), backlog: sum('backlog'), ready: sum('ready'), projects: 3 });
+  });
+
+  await test('a renamed review state is reported rather than silently zero', () => {
+    const renamed = aggregate({ ...workspace, states: [{ name: 'Peer Review', type: 'started' }] }, {});
+    assert.strictEqual(renamed.reviewStateKnown, false);
+    const ok = aggregate(workspace, {});
+    assert.strictEqual(ok.reviewStateKnown, true);
+  });
+
+  await test('LINEAR_STATS_REVIEW_STATES redefines the review column', () => {
+    const custom = aggregate(workspace, { LINEAR_STATS_REVIEW_STATES: 'In Progress, In Review' });
+    assert.strictEqual(custom.rows.find((r) => r.name === 'Fexi').review, 2);
+  });
+
+  await test('LINEAR_STATS_READY_LABEL redefines the ready column', () => {
+    const custom = aggregate(workspace, { LINEAR_STATS_READY_LABEL: 'bug' });
+    assert.strictEqual(custom.rows.find((r) => r.name === 'Fexi').ready, 1);
+  });
+
+  // ---- Fetching and caching (no network) ----
+
+  const linearProvider = require('../src/providers/linear-stats');
+  const linearApi = require('../src/providers/linear-stats/linear');
+
+  await test('credential discovery finds nothing (hermetic environment)', () => {
+    // Canary, like the claude-stats one above: LINEAR_API_KEY is cleared and the
+    // `security` stub at the top of this file makes the Keychain come up empty.
+    // If this fails, a lookup path escaped the stub and the assertions below —
+    // which all rest on "no key" — are meaningless.
+    delete process.env.LINEAR_API_KEY;
+    const { findApiKey } = require('../src/providers/linear-stats/credential');
+    assert.strictEqual(findApiKey(), null);
+  });
+
+  await test('no credential means no network call at all', async () => {
+    delete process.env.LINEAR_API_KEY;
+    let called = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = () => {
+      called += 1;
+      throw new Error('the provider must not reach the network without a key');
+    };
+    try {
+      const res = await linearProvider.runFetch();
+      assert.strictEqual(called, 0, 'fetch was never invoked');
+      assert.strictEqual(res.available, false);
+      assert.deepStrictEqual(res.rows, []);
+      assert.ok(/no Linear API key/.test(res.error), res.error);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  await test('a GraphQL error is surfaced, and an auth failure is flagged', async () => {
+    const find = () => ({ key: 'lin_api_test', source: 'env' });
+    const bad = await linearProvider.runFetch(find, async () => ({ error: 'Authentication required (AUTHENTICATION_ERROR)' }));
+    assert.strictEqual(bad.available, false);
+    assert.strictEqual(bad.auth, true, 'classified as auth so the cache backs off');
+
+    const blip = await linearProvider.runFetch(find, async () => ({ error: 'Linear request timed out' }));
+    assert.strictEqual(blip.auth, false, 'a timeout is transient, not auth');
+  });
+
+  await test('a rejected key backs off; a transient failure retries soon', () => {
+    const long = linearProvider.ttlFor({ available: false, auth: true });
+    const rate = linearProvider.ttlFor({ available: false, status: 429 });
+    const short = linearProvider.ttlFor({ available: false, error: 'timed out' });
+    assert.ok(long >= 300_000, `auth failure holds for the full window, got ${long}`);
+    assert.strictEqual(rate, long, '429 backs off like a rejected key');
+    assert.ok(short < long, `a transient failure expires sooner (${short} < ${long})`);
+  });
+
+  await test('a failed poll keeps the last good counts, marked stale', async () => {
+    linearProvider._resetCache();
+    const find = () => ({ key: 'lin_api_test', source: 'env' });
+    const good = await linearProvider.getCached(() => linearProvider.runFetch(find, async () => workspace));
+    assert.strictEqual(good.available, true);
+    assert.ok(good.rows.length, 'first poll produced rows');
+
+    linearProvider._expireCache(); // keeps lastGood
+    const failed = await linearProvider.getCached(() => linearProvider.runFetch(find, async () => ({ error: 'boom' })));
+    assert.strictEqual(failed.available, false, 'not presented as a live reading');
+    assert.strictEqual(failed.stale, true);
+    assert.ok(failed.staleSince, 'says when the retained counts were taken');
+    assert.deepStrictEqual(failed.rows, good.rows, 'the counts survive the failure');
+    linearProvider._resetCache();
+  });
+
+  await test('issue paging follows the cursor to the end', async () => {
+    const pages = [
+      { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [ln.issue('p1', 'Backlog', 'backlog', [])] },
+      { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [ln.issue('p1', 'Backlog', 'backlog', [])] },
+    ];
+    const seen = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      seen.push(body.variables.after || null);
+      return { status: 200, text: async () => JSON.stringify({ data: { issues: pages[seen.length - 1] } }) };
+    };
+    try {
+      const res = await linearApi.fetchIssues('lin_api_test');
+      assert.strictEqual(res.nodes.length, 2, 'both pages collected');
+      assert.deepStrictEqual(seen, [null, 'c1'], 'second request carried the cursor');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  await test('a GraphQL 200 carrying errors[] is treated as a failure', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 200,
+      text: async () => JSON.stringify({ errors: [{ message: 'Query too complex', extensions: { code: 'COMPLEXITY' } }] }),
+    });
+    try {
+      const res = await linearApi.post('lin_api_test', 'query {}', {});
+      assert.ok(res.error, 'errors[] on a 200 is still an error');
+      assert.ok(/Query too complex \(COMPLEXITY\)/.test(res.error), res.error);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   console.log('\nProvider registry');
   const { loadProviders, indexById } = require('../src/core/registry');
   const registry = loadProviders();
