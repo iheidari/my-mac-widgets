@@ -496,6 +496,235 @@ childProcess.execFileSync = (file, args, opts) => {
     assert.strictEqual(calls, 1);
   });
 
+  console.log('\nSystem status');
+  //
+  // Every assertion below feeds a fixture into a pure function. Nothing here
+  // shells out, reads a real volume, touches the network or sleeps — the
+  // numbers this widget shows are machine-specific, so a test that measured
+  // the developer's actual machine could only assert that arithmetic is
+  // arithmetic.
+  const sys = require('../src/providers/system-status/system');
+
+  await test('parses kern.boottime into an epoch', () => {
+    assert.strictEqual(sys.parseBootTime('{ sec = 1785611624, usec = 206644 } Sat Aug  1 12:13:44 2026'), 1785611624000);
+    assert.strictEqual(sys.parseBootTime('nonsense'), null);
+  });
+
+  await test('formats uptime one step below the leading unit', () => {
+    assert.strictEqual(sys.formatUptime(12 * 60), '12m');
+    assert.strictEqual(sys.formatUptime(3 * 3600 + 12 * 60), '3h 12m');
+    assert.strictEqual(sys.formatUptime(86400 + 11 * 3600), '1d 11h');
+    assert.strictEqual(sys.formatUptime(null), null);
+  });
+
+  await test('uptime is measured from boot to now', () => {
+    const boot = 1785611624000;
+    const up = sys.uptimeFrom(boot, boot + 90 * 60 * 1000);
+    assert.strictEqual(up.seconds, 5400);
+    assert.strictEqual(up.text, '1h 30m');
+    assert.strictEqual(up.bootAt, new Date(boot).toISOString());
+  });
+
+  // 4000 pages of 4 KiB = 16,384,000 bytes total. App Memory is anonymous less
+  // purgeable (1800 − 300 = 1500), plus 400 wired and 100 compressed = 2000
+  // pages used, exactly half. 1500 pages are idle (free + speculative), leaving
+  // 500 as file cache.
+  const VM_STAT = [
+    'Mach Virtual Memory Statistics: (page size of 4096 bytes)',
+    'Pages free:                                     1000.',
+    'Pages active:                                   1700.',
+    'Pages inactive:                                  800.',
+    'Pages speculative:                               500.',
+    'Pages wired down:                                400.',
+    'Pages purgeable:                                 300.',
+    'Anonymous pages:                                1800.',
+    'Pages stored in compressor:                      900.',
+    'Pages occupied by compressor:                    100.',
+  ].join('\n');
+
+  // The number to beat is `top`'s "PhysMem used" — total − free − speculative —
+  // which counts the whole file-backed cache as used and reads ~30 points high
+  // (71% vs 40% on a real machine). That would leave the bar permanently amber
+  // or red on a Mac under no memory pressure. If this assertion ever reads 2500
+  // pages, the shortcut has crept back in.
+  await test('memory used matches Activity Monitor (App + Wired + Compressed)', () => {
+    const mem = sys.parseVmStat(VM_STAT, 4000 * 4096);
+    assert.strictEqual(mem.usedBytes, 2000 * 4096);
+    assert.strictEqual(mem.usedPercent, 50);
+  });
+
+  // Cached files are neither used nor idle, and Activity Monitor reports them
+  // on their own line for exactly that reason.
+  await test('memory reports the file cache separately from used', () => {
+    const mem = sys.parseVmStat(VM_STAT, 4000 * 4096);
+    assert.strictEqual(mem.cachedBytes, 500 * 4096);
+    assert.strictEqual(mem.freeBytes, 2000 * 4096, 'everything not used is available to apps');
+    assert.strictEqual(mem.usedBytes + mem.freeBytes, mem.totalBytes, 'the payload reconciles');
+  });
+
+  await test('memory degrades to null on unparseable vm_stat', () => {
+    assert.strictEqual(sys.parseVmStat('garbage', 4000 * 4096), null);
+    assert.strictEqual(sys.parseVmStat(VM_STAT, 0), null);
+    // A vm_stat missing one of the fields the formula needs is not a reason to
+    // report a number computed from the rest.
+    assert.strictEqual(sys.parseVmStat(VM_STAT.replace(/Pages wired down:.*/, ''), 4000 * 4096), null);
+  });
+
+  // Capacity is measured against what this user can claim, matching df: the
+  // blocks reserved for root are neither used nor available.
+  await test('disk capacity excludes root-reserved blocks, like df', () => {
+    const d = sys.diskFromStatfs({ bsize: 4096, blocks: 1000, bfree: 400, bavail: 300 }, '/vol');
+    assert.strictEqual(d.usedPercent, 66.7); // 600 used / (600 used + 300 avail)
+    assert.strictEqual(d.totalBytes, 1000 * 4096);
+    assert.strictEqual(d.freeBytes, 300 * 4096);
+    assert.strictEqual(d.volume, '/vol');
+    // usedBytes/totalBytes is deliberately NOT usedPercent, so the denominator
+    // ships too — otherwise a consumer recomputing the bar gets a different
+    // number than the widget draws.
+    assert.strictEqual(d.capacityBytes, 900 * 4096);
+  });
+
+  await test('disk degrades to null rather than throwing', () => {
+    assert.strictEqual(sys.diskFromStatfs(null, '/vol'), null);
+    assert.strictEqual(sys.diskFromStatfs({ bsize: 4096, blocks: 0, bfree: 0, bavail: 0 }, '/vol'), null);
+  });
+
+  // The default volume must not be `/`: on APFS that is the sealed read-only
+  // system snapshot, which reports a fixed ~15% no matter how full the Mac is.
+  await test('the disk reading targets the Data volume, not the sealed snapshot', () =>
+    assert.strictEqual(sys.DEFAULT_VOLUME, '/System/Volumes/Data'));
+
+  const { resolveOnline, ConnectivityMonitor } = require('../src/providers/system-status/connectivity');
+
+  // A scripted probe plus a no-op sleep: the ladder's logic is tested without
+  // spending the 15 seconds it takes in real life, and without the network —
+  // the `execFileSync` stub at the top of this file does not cover `http`, so
+  // anything that lets the real prober run would reach out to Apple.
+  function scripted(results) {
+    let i = 0;
+    return () => Promise.resolve(results[i++]);
+  }
+
+  await test('a single failed probe is not offline — it is retried 3 times, 5s apart', async () => {
+    const waits = [];
+    const verdict = await resolveOnline(scripted([false, false, false, false]), {
+      retries: 3,
+      delayMs: 5000,
+      sleep: async (ms) => waits.push(ms),
+    });
+    assert.strictEqual(verdict.online, false);
+    assert.strictEqual(verdict.attempts, 4, 'the first probe plus three retries');
+    assert.deepStrictEqual(waits, [5000, 5000, 5000]);
+  });
+
+  await test('a blip resolves as online and stops the ladder early', async () => {
+    const waits = [];
+    const verdict = await resolveOnline(scripted([false, true]), {
+      retries: 3,
+      delayMs: 5000,
+      sleep: async (ms) => waits.push(ms),
+    });
+    assert.strictEqual(verdict.online, true);
+    assert.strictEqual(verdict.attempts, 2, 'stops as soon as one probe succeeds');
+    assert.deepStrictEqual(waits, [5000], 'no further waiting once the answer is known');
+  });
+
+  // Re-confirming a state we are already in would spend 15 seconds arriving at
+  // the same answer, so an offline monitor polls with a single request.
+  await test('retries: 0 makes one probe and no waiting', async () => {
+    const waits = [];
+    const verdict = await resolveOnline(scripted([false]), {
+      retries: 0,
+      delayMs: 5000,
+      sleep: async (ms) => waits.push(ms),
+    });
+    assert.strictEqual(verdict.attempts, 1);
+    assert.deepStrictEqual(waits, []);
+  });
+
+  // Constructing the monitor must not start the loop — the prober arms on the
+  // first read(), which is what keeps a one-shot CLI call off the network.
+  await test('connectivity starts unknown, not offline', () =>
+    assert.strictEqual(new ConnectivityMonitor().snapshot().online, null));
+
+  // Drive one full cycle by hand with an injected clock, and park it in the
+  // same pass (lastRead is ancient) so no live timer outlives the test.
+  function oneCycle(probe) {
+    const m = new ConnectivityMonitor({ probe, now: () => 1_000, idleStopMs: 1, sleep: async () => {} });
+    m.lastRead = 0;
+    m.running = true;
+    m.generation = 1;
+    return m.cycle(1).then(() => m);
+  }
+
+  await test('a cycle records the verdict and then parks when nothing is reading', async () => {
+    const m = await oneCycle(async () => true);
+    assert.strictEqual(m.online, true);
+    assert.ok(m.checkedAt, 'checkedAt is stamped so the widget can age the reading');
+    assert.strictEqual(m.running, false, 'parks itself rather than polling the internet forever');
+    assert.strictEqual(m.timer, null);
+  });
+
+  // A probe that rejects must not end connectivity for the life of the process:
+  // before this, an unhandled rejection left `running` true, so the loop never
+  // rescheduled and start() could never revive it.
+  await test('a rejecting probe leaves the monitor restartable', async () => {
+    const m = await oneCycle(async () => {
+      throw new Error('boom');
+    });
+    assert.strictEqual(m.online, null, 'keeps the last verdict rather than inventing one');
+    assert.strictEqual(m.running, false);
+    m.read();
+    assert.strictEqual(m.running, true, 'a later read() re-arms the loop');
+    m.stop();
+  });
+
+  // Regression for the defect that made this whole thing worth testing: the
+  // 4 KiB body cap used to call res.destroy() and then wait for an 'end' event
+  // that a destroyed stream never emits. The promise stayed pending, cycle()'s
+  // await never returned, and connectivity was dead until the helper restarted.
+  // A captive portal — the exact case the marker check exists for — is always
+  // bigger than 4 KiB and arrives in ~1.4 KiB chunks over a real link.
+  //
+  // Hermetic: the server is on 127.0.0.1, like the end-to-end section below.
+  await test('an oversized chunked response still settles instead of wedging', async () => {
+    const { probeOnce } = require('../src/providers/system-status/connectivity');
+    const serve = (body) =>
+      new Promise((resolve) => {
+        const srv = http.createServer((_req, res) => {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          let sent = 0;
+          const tick = setInterval(() => {
+            res.write(body.slice(sent, sent + 1400));
+            sent += 1400;
+            if (sent >= body.length) {
+              clearInterval(tick);
+              res.end();
+            }
+          }, 1);
+          // The probe hangs up at 4 KiB, so stop writing then — otherwise the
+          // rest of the body lands on a destroyed response and the test passes
+          // only because Node swallows write-after-destroy when nobody listens.
+          res.on('close', () => clearInterval(tick));
+        });
+        srv.listen(0, '127.0.0.1', () => resolve(srv));
+      });
+
+    const portal = await serve('<html>' + 'x'.repeat(20_000) + '</html>'); // no marker
+    const healthy = await serve('<HTML><BODY>Success</BODY></HTML>' + 'x'.repeat(20_000));
+    const url = (s) => `http://127.0.0.1:${s.address().port}/`;
+    try {
+      const verdict = await Promise.race([
+        Promise.all([probeOnce(url(portal)), probeOnce(url(healthy))]),
+        new Promise((_r, reject) => setTimeout(() => reject(new Error('probe never settled')), 5_000)),
+      ]);
+      assert.deepStrictEqual(verdict, [false, true], 'a portal page is offline; an early marker is online');
+    } finally {
+      portal.close();
+      healthy.close();
+    }
+  });
+
   console.log('\nProvider registry');
   const { loadProviders, indexById } = require('../src/core/registry');
   const registry = loadProviders();
