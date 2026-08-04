@@ -7,6 +7,7 @@
 import {
   statsCommand,
   parseOutput,
+  refreshNow,
   baseCss,
   relTime,
   openUrl,
@@ -20,8 +21,18 @@ import {
 } from "./kit.jsx";
 
 const TITLE = "Linear";
+const PROVIDER = "linear-stats";
 
-export const command = statsCommand("linear-stats");
+// Übersicht's id for this file: the path under the widgets folder with every
+// non-alphanumeric replaced by "-". Renaming the folder or this file changes it,
+// and the ↻ button would then refresh nothing — so it is spelled out here rather
+// than derived, where a rename is visible next to the rest of the widget.
+const WIDGET_ID = "linear-stats-widget-index-jsx";
+
+export const command = statsCommand(PROVIDER);
+
+// The ↻ in the header: drop the helper's 5-minute cache and re-poll now.
+const refresh = () => refreshNow(PROVIDER, WIDGET_ID);
 
 // The helper caches for 5 minutes, so polling faster than this would only
 // re-render the same numbers — this is how quickly a fresh poll reaches screen.
@@ -86,14 +97,18 @@ const ProjectRow = ({ row }) => (
 
 export const render = ({ output }) => {
   const { offline, error, data } = parseOutput(output);
-  if (offline) return <Offline title={TITLE} />;
-  if (error) return <Message title={TITLE}>{error}</Message>;
+  if (offline) return <Offline title={TITLE} onRefresh={refresh} />;
+  if (error) return <Message title={TITLE} onRefresh={refresh}>{error}</Message>;
 
   const rows = data.rows || [];
   // No rows and nothing retained: either no key is set up yet or the very first
   // poll failed. Either way the error text is the only useful thing to show.
   if (!rows.length) {
-    return <Message title={TITLE}>{data.error || "No projects to report."}</Message>;
+    return (
+      <Message title={TITLE} onRefresh={refresh}>
+        {data.error || "No projects to report."}
+      </Message>
+    );
   }
 
   const t = data.totals || { review: 0, backlog: 0, ready: 0 };
@@ -104,6 +119,7 @@ export const render = ({ output }) => {
       title={TITLE}
       live={data.available === true}
       dotTitle={stale ? `Last poll failed — ${data.error || "unknown error"}` : "Live"}
+      onRefresh={refresh}
     >
       <Grid columns={3}>
         <Tile value={t.review} label="Review" color="#C4B5FD" />

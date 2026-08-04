@@ -910,6 +910,25 @@ childProcess.execFileSync = (file, args, opts) => {
     linearProvider._resetCache();
   });
 
+  // What the ↻ button buys: without it the 5-minute TTL (or the full-window
+  // back-off on a rejected key) would serve the same numbers again.
+  await test('invalidating the cache forces the next read to re-fetch', async () => {
+    linearProvider._resetCache();
+    const find = () => ({ key: 'lin_api_test', source: 'env' });
+    let calls = 0;
+    const poll = () => linearProvider.getCached(() => {
+      calls += 1;
+      return linearProvider.runFetch(find, async () => workspace);
+    });
+    await poll();
+    await poll();
+    assert.strictEqual(calls, 1, 'the second read came from the cache');
+    linearProvider._expireCache();
+    await poll();
+    assert.strictEqual(calls, 2, 'a refresh re-fetches');
+    linearProvider._resetCache();
+  });
+
   await test('issue paging follows the cursor to the end', async () => {
     const pages = [
       { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [ln.issue('p1', 'Backlog', 'backlog', [])] },
@@ -1059,6 +1078,17 @@ childProcess.execFileSync = (file, args, opts) => {
     assert.ok(p, 'claude-stats listed');
     assert.strictEqual(p.url, '/stats/claude-stats');
     assert.ok(p.routes.includes('POST /v1/metrics'), 'provider routes reported');
+  });
+
+  // The widget's ↻ button. Hermetic: no LINEAR_API_KEY and the Keychain lookup is
+  // stubbed, so this exercises the route, not the network.
+  const refreshRes = await req('POST', '/linear-stats/refresh');
+  await test('POST /linear-stats/refresh serves a payload the widget can render', () => {
+    assert.strictEqual(refreshRes.status, 200);
+    assert.strictEqual(refreshRes.body.available, false); // no key in test env
+    assert.ok(Array.isArray(refreshRes.body.rows));
+    const p = provRes.body.providers.find((x) => x.id === 'linear-stats');
+    assert.ok(p.routes.includes('POST /linear-stats/refresh'), 'the route is registered');
   });
 
   const limitsRes = await req('GET', '/limits');

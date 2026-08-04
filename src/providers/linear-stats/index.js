@@ -133,10 +133,20 @@ function _resetCache() {
   lastGood = null;
 }
 
-// Expire the memo but KEEP lastGood, so the stale-fallback path is reachable in
-// a test (TTL_MS is frozen at load, so env can't force a re-fetch).
-function _expireCache() {
-  cache = { value: null, at: 0, inflight: null };
+// Expire the memo but KEEP lastGood: the next read re-fetches, and if that fetch
+// fails the retained counts are still there to degrade to. Used by the manual
+// refresh route below, and by the stale-fallback test (TTL_MS is frozen at load,
+// so env can't force a re-fetch).
+//
+// An in-flight fetch is carried over rather than dropped, so two refreshes in a
+// row de-duplicate onto one Linear request instead of racing.
+function invalidate() {
+  cache = { value: null, at: 0, inflight: cache.inflight };
+}
+
+async function collect() {
+  const data = await getCached();
+  return { ...data, generatedAt: new Date().toISOString() };
 }
 
 module.exports = {
@@ -147,10 +157,23 @@ module.exports = {
   // is off; in-flight de-duplication still applies.
   ttlMs: 0,
 
-  async collect() {
-    const data = await getCached();
-    return { ...data, generatedAt: new Date().toISOString() };
-  },
+  collect,
+
+  routes: [
+    // Manual refresh, from the widget's ↻ button. POST because it has an effect —
+    // it drops the cache — and it lives outside /stats/, which the host reserves
+    // for payloads. Deliberately ignores the back-off in ttlFor(): a user asking
+    // for fresh numbers is usually a user who has just fixed something (a revoked
+    // key, a ticket they moved), and the whole point is not to wait five minutes.
+    {
+      method: 'POST',
+      path: '/linear-stats/refresh',
+      async handler(req, res, { sendJson }) {
+        invalidate();
+        sendJson(res, 200, await collect());
+      },
+    },
+  ],
 
   print(data) {
     console.log('\n  Linear');
@@ -173,5 +196,5 @@ module.exports = {
   getCached,
   ttlFor,
   _resetCache,
-  _expireCache,
+  _expireCache: invalidate,
 };

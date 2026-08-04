@@ -51,6 +51,29 @@ export function openUrl(url) {
   run(`open ${quoted}`);
 }
 
+// Manual refresh: drop the provider's cached payload, then ask Übersicht to
+// re-run this widget's command so the new numbers land now rather than at the
+// next poll. Two steps in one shell command, sequenced so the re-poll sees the
+// fresh value; the refresh is unconditional (`;`, not `&&`) because a failed
+// POST is exactly when re-rendering — into the offline card — is right.
+//
+// `provider` must expose POST /<provider>/refresh (the host reserves /stats/).
+// `widgetId` is Übersicht's id for the widget *file*: its path under the widgets
+// folder with every non-alphanumeric replaced by "-", e.g.
+// linear-stats.widget/index.jsx -> "linear-stats-widget-index-jsx".
+const SAFE_ID = /^[A-Za-z0-9._-]+$/;
+
+export function refreshNow(provider, widgetId, { port = DEFAULT_PORT, host = DEFAULT_HOST, timeout = 20 } = {}) {
+  // Both go into a shell command unquoted. They are widget-authored constants
+  // rather than API data, but a typo should fail here, not run something.
+  if (!SAFE_ID.test(provider || "") || !SAFE_ID.test(widgetId || "")) {
+    return Promise.reject(new Error("refreshNow: bad provider or widget id"));
+  }
+  const url = `http://${host}:${port}/${provider}/refresh`;
+  const tell = `tell application id "tracesOf.Uebersicht" to refresh widget id "${widgetId}"`;
+  return run(`curl -s -X POST --max-time ${timeout} ${url} > /dev/null; osascript -e '${tell}'`);
+}
+
 // ---------------------------------------------------------------- formatting
 
 export function fmt(n) {
@@ -123,6 +146,15 @@ export const baseCss = `
     margin-bottom: 14px;
   }
   .wk-title { font-size: 14px; font-weight: 600; letter-spacing: 0.2px; }
+  .wk-head-right { display: flex; align-items: center; gap: 9px; }
+  .wk-refresh {
+    display: inline-block; cursor: pointer; user-select: none;
+    font-size: 20px; line-height: 1; color: #FFFFFF;
+  }
+  .wk-refresh:hover { color: var(--wk-accent); }
+  /* Held while the refresh command runs, then removed (see RefreshButton). */
+  .wk-spinning { color: var(--wk-accent); cursor: default; animation: wk-spin 0.9s linear infinite; }
+  @keyframes wk-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   .wk-dot {
     width: 8px; height: 8px; border-radius: 50%;
     box-shadow: 0 0 8px currentColor;
@@ -194,20 +226,45 @@ export const baseCss = `
 
 // --------------------------------------------------------------- components
 
+// The ↻ in a card's header. `onRefresh` returns the promise from refreshNow().
+//
+// The spinner is a class put on the DOM node by hand rather than component
+// state: Übersicht exposes only `html` (= React.createElement) as a global, so a
+// widget has no React to call useState on, and re-rendering is Übersicht's job
+// anyway. The class comes off when the shell command resolves — which is roughly
+// when the re-render it triggered arrives.
+function RefreshButton({ onRefresh, title }) {
+  const start = (event) => {
+    const el = event.currentTarget;
+    if (el.classList.contains("wk-spinning")) return; // already running
+    el.classList.add("wk-spinning");
+    const done = () => el.classList.remove("wk-spinning");
+    Promise.resolve(onRefresh()).then(done, done);
+  };
+  return (
+    <span className="wk-refresh" onClick={start} title={title || "Refresh now"}>
+      ↻
+    </span>
+  );
+}
+
 // The frosted panel every widget sits in. `live` drives the status dot;
-// pass null to omit the dot entirely.
-export function Card({ title, live, dotTitle, children }) {
+// pass null to omit the dot entirely. `onRefresh` adds the manual-refresh ↻.
+export function Card({ title, live, dotTitle, onRefresh, refreshTitle, children }) {
   return (
     <div className="wk-card">
       {title != null && (
         <div className="wk-head">
           <span className="wk-title">{title}</span>
-          {live != null && (
-            <span
-              className={"wk-dot " + (live ? "wk-live" : "wk-idle")}
-              title={dotTitle || (live ? "Live" : "Idle")}
-            />
-          )}
+          <span className="wk-head-right">
+            {onRefresh && <RefreshButton onRefresh={onRefresh} title={refreshTitle} />}
+            {live != null && (
+              <span
+                className={"wk-dot " + (live ? "wk-live" : "wk-idle")}
+                title={dotTitle || (live ? "Live" : "Idle")}
+              />
+            )}
+          </span>
         </div>
       )}
       {children}
@@ -289,9 +346,11 @@ export function Bar({ label, percent, value, color, subPercent, subTitle, captio
 }
 
 // Standard "helper isn't running" card, so every widget fails the same way.
-export function Offline({ title, hint = "widget-helper serve" }) {
+// `onRefresh` is worth passing here too: it is the retry after starting the
+// helper, without waiting out a poll interval.
+export function Offline({ title, hint = "widget-helper serve", onRefresh }) {
   return (
-    <Card title={title} live={false} dotTitle="Helper offline">
+    <Card title={title} live={false} dotTitle="Helper offline" onRefresh={onRefresh} refreshTitle="Retry">
       <div className="wk-message">
         Helper offline. Start it with:
         <br />
@@ -301,9 +360,9 @@ export function Offline({ title, hint = "widget-helper serve" }) {
   );
 }
 
-export function Message({ title, children }) {
+export function Message({ title, children, onRefresh }) {
   return (
-    <Card title={title}>
+    <Card title={title} onRefresh={onRefresh} refreshTitle="Retry">
       <div className="wk-message">{children}</div>
     </Card>
   );

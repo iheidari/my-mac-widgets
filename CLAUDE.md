@@ -85,6 +85,11 @@ A provider whose payload mixes cadences opts out with **`ttlMs: 0`**, which disa
 
 `widget-kit/kit.jsx` holds the shared chrome: `baseCss` (all `wk-` prefixed), `Card`/`Grid`/`Tile`/`Bar`/`Section`/`Foot`/`Offline`/`Message`, the formatters (`fmt`, `usd`, `hour`, `relTime`, `pctColor`), `openUrl()` for click handlers, and `statsCommand()`/`parseOutput()` which build the `curl` poll and normalize its output. Widgets should contribute only positioning, layout, and their own data-shaping helpers.
 
+`refreshNow(provider, widgetId)` is the manual-refresh half of `Card`'s `onRefresh` prop (the ↻ next to the status dot, also available on `Offline`/`Message`): one shell command that POSTs `/<provider>/refresh` to drop that provider's cache and then tells Übersicht to re-run *this widget's* command, so the new numbers land immediately instead of at the next poll. Two things to keep in mind:
+
+- `widgetId` is Übersicht's id for the widget **file** — its path under the widgets folder with every non-alphanumeric replaced by `-` (`linear-stats.widget/index.jsx` → `linear-stats-widget-index-jsx`). Renaming the folder or the file changes it, and a wrong id makes the button silently refresh nothing. Widgets spell it out as a constant next to `command`; `curl -s http://127.0.0.1:41416/state/` lists the live ids.
+- The spinner is a class added to the DOM node by hand (`RefreshButton`), not component state. Übersicht exposes only `html` (= `React.createElement`) as a global, so a widget has no React object to call `useState` on — don't reach for hooks or a class component here, and don't `import React` (browserify would bundle a *second* copy).
+
 `openUrl()` wraps `run` from the `uebersicht` module — Übersicht marks that module external when bundling (`server.js`: `bundle.external('uebersicht')`) and supplies it at runtime, so the import resolves from the shared kit exactly as it would from a widget's own file. It shells out, so the URL is **single-quoted, with embedded quotes escaped**, never interpolated bare: these strings come back from an API. Pair it with the `wk-click` class for the cursor and hover highlight.
 
 Each `widgets/<id>.widget/kit.jsx` is a **symlink** to `widget-kit/kit.jsx`; `deploy.sh` copies with `cp -RL` so the deployed bundle is self-contained. This matters because Übersicht bundles each widget folder independently (browserify + babel, JSX pragma `html` = `React.createElement`, exposed as a true global). Two consequences:
@@ -165,6 +170,8 @@ A Linear personal API key carries the user's full workspace permissions — Line
 ### Caching
 
 `ttlMs: 0` (host in-flight de-dup only) plus an internal adaptive cache, same shape as `planLimits.js`: 5-minute success TTL, 60s for transient failures, and the **full** window for auth failures and 429s so a revoked key isn't retried every poll. `lastGood` retains the previous counts and a failed poll returns them with `stale: true` + `staleSince`, rendered dimmed. Unlike the plan-limit bars there is deliberately **no** `STALE_MAX_MS` cap: a ticket count from this morning is still a true statement about this morning, whereas a usage percentage from before a window reset is actively wrong.
+
+`POST /linear-stats/refresh` (the widget's ↻ button) drops that cache and re-collects, returning the fresh payload. It deliberately ignores `ttlFor()`'s back-off — a user asking for numbers now has usually just fixed the thing that was wrong (a revoked key, a ticket they moved) and shouldn't wait out a five-minute window. `invalidate()` carries any in-flight fetch over instead of clearing it, so a double-click de-duplicates onto one Linear request rather than racing a second.
 
 `PAGE_SIZE` (50) and `labels(first: 20)` are held below the API's maxima on purpose — Linear rejects requests over a complexity budget that counts nested selections, and `linearis` trips it at 100.
 
