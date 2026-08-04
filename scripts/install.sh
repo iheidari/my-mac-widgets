@@ -2,7 +2,8 @@
 #
 # One-shot installer for macOS:
 #   1. installs a launchd service so the widget helper runs at login
-#   2. copies every widget in widgets/ into Übersicht (via deploy.sh)
+#   2. offers to store a Linear API key in the Keychain (optional)
+#   3. copies every widget in widgets/ into Übersicht (via deploy.sh)
 #
 # Re-runnable (idempotent). Requires Node 18+.
 #
@@ -69,7 +70,44 @@ else
   echo "==> Helper not responding yet — check logs in $LOGDIR" >&2
 fi
 
-# --- 2. Übersicht widgets ----------------------------------------------------
+# --- 2. Linear API key (optional) --------------------------------------------
+# The linear-stats provider needs a personal API key. Without one it makes no
+# network call and the widget just shows a setup hint, so this is offered rather
+# than required — and skipped entirely when there is no terminal to prompt on.
+LINEAR_SERVICE="linear-stats" # must match KEYCHAIN_SERVICE in src/providers/linear-stats/credential.js
+
+if security find-generic-password -s "$LINEAR_SERVICE" >/dev/null 2>&1; then
+  echo "==> Linear API key already in the Keychain ($LINEAR_SERVICE)"
+elif [[ -n "${LINEAR_API_KEY:-}" ]]; then
+  echo "==> LINEAR_API_KEY is set in the environment — leaving the Keychain alone"
+elif [[ -t 0 ]]; then
+  echo
+  echo "==> Linear widget (optional)"
+  echo "    Create a personal API key at https://linear.app/settings/api"
+  echo "    Note: a personal key carries your full Linear permissions."
+  echo "    Press Return to skip."
+  # -s so the key never appears on screen or in scrollback.
+  read -rsp "    Linear API key: " LINEAR_KEY_INPUT || LINEAR_KEY_INPUT=""
+  echo
+  if [[ -n "$LINEAR_KEY_INPUT" ]]; then
+    # `-w` last with no value: security reads the secret from stdin (prompting
+    # twice) instead of taking it from argv, where any local process could read
+    # it out of `ps`.
+    printf '%s\n%s\n' "$LINEAR_KEY_INPUT" "$LINEAR_KEY_INPUT" |
+      security add-generic-password -U -a "$USER" -s "$LINEAR_SERVICE" -w
+    unset LINEAR_KEY_INPUT
+    echo "==> Linear API key stored in the Keychain ($LINEAR_SERVICE)"
+    # The helper reads the Keychain on its next poll, but it caches failures for
+    # a minute — restart so the widget lights up now rather than shortly.
+    launchctl kickstart -k "gui/$UID/$LABEL" >/dev/null 2>&1 || true
+  else
+    echo "==> Skipped — the Linear widget will show a setup hint until a key is added."
+  fi
+else
+  echo "==> No Linear API key found (non-interactive) — add one later by re-running this script."
+fi
+
+# --- 3. Übersicht widgets ----------------------------------------------------
 "$REPO_DIR/scripts/deploy.sh"
 
 echo

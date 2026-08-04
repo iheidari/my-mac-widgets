@@ -97,6 +97,8 @@ to one data source lives in its own provider folder.
 | `src/core/config.js` | Port, host, default provider, allow/deny lists |
 | `src/cli.js` | CLI: `serve` (default), `list`, `print`, `parse`, `help` |
 | `src/providers/claude-stats/` | The Claude Code data source (parser, telemetry, pricing, plan limits) |
+| `src/providers/linear-stats/` | Per-project Linear ticket counts (GraphQL, Keychain-stored API key) |
+| `src/providers/system-status/` | Uptime, memory, disk and connectivity |
 | `widgets/<id>.widget/` | One Übersicht widget per folder |
 | `widget-kit/kit.jsx` | Shared CSS + `Card`/`Tile`/`Bar`/`Section` components + formatters |
 | `scripts/new-widget.sh` | Scaffolds a provider + widget from `scripts/templates/` |
@@ -358,6 +360,47 @@ out and force you to sign in again.
 
 ---
 
+## Linear project stats
+
+The `linear-stats` widget lists every open Linear project with three counts:
+
+| Column | What it counts |
+|--------|----------------|
+| **Review** | issues in the `In Review` status |
+| **Backlog** | issues in `Backlog` **or** `Todo` |
+| **Ready** | backlog issues carrying the `Ready to play` label |
+
+Clicking a project row opens it in Linear. Completed and canceled work is
+excluded, and a project with nothing open still gets a row at `0 · 0 · 0`.
+
+### Setup
+
+It needs a Linear **personal API key**. `./scripts/install.sh` offers to store
+one for you; to do it by hand:
+
+```bash
+# Create a key at https://linear.app/settings/api, then:
+security add-generic-password -U -a "$USER" -s linear-stats -w
+# (paste the key at the prompt — it is asked for twice)
+```
+
+Or set `LINEAR_API_KEY` in the helper's environment, which takes priority.
+
+Until a key is found the widget shows a setup hint and **makes no network
+call at all**. Be aware that a Linear personal API key carries your full
+workspace permissions — Linear has no read-only variant. The helper only ever
+issues read queries with it.
+
+### Why "Review" is matched by name
+
+Linear types both `In Progress` and `In Review` as `started`, so there is no way
+to tell them apart except by the status name. That makes the column sensitive to
+renaming the status in Linear — so the widget checks whether a matching status
+still exists and warns you instead of quietly showing `0`. If you rename it, set
+`LINEAR_STATS_REVIEW_STATES` to the new name.
+
+---
+
 ## Configuration
 
 **Host** (applies to every widget):
@@ -385,6 +428,17 @@ out and force you to sign in again.
 | `CLAUDE_STATS_USER_AGENT` | `claude-code/<detected>` | User-Agent sent to the usage endpoint |
 | `CLAUDE_STATS_AUTO_REFRESH` | (off) | Set to `1` to let the helper renew and re-store the OAuth token — see the warning above |
 | `CLAUDE_STATS_OAUTH_CLIENT_ID` | (Claude Code's) | OAuth client id used when auto-refresh redeems the refresh token |
+
+**The `linear-stats` provider:**
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `LINEAR_API_KEY` | (unset) | Provide the API key directly instead of reading the Keychain |
+| `LINEAR_STATS` | (on) | Set to `off` to disable Linear polling entirely |
+| `LINEAR_STATS_TTL_MS` | `300000` | Refresh interval (min 30s — enforced) |
+| `LINEAR_STATS_ERROR_TTL_MS` | `60000` | Back-off before retrying after a failed poll |
+| `LINEAR_STATS_REVIEW_STATES` | `In Review` | Comma-separated status names counted as "in review" |
+| `LINEAR_STATS_READY_LABEL` | `Ready to play` | Label counted in the "ready" column |
 
 If you change the port, update `DEFAULT_PORT` at the top of `widget-kit/kit.jsx`
 (every widget reads it from there) and re-run `./scripts/deploy.sh`.

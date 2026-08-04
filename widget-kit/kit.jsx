@@ -11,6 +11,11 @@
 // do in a widget's own file. Avoid JSX fragments (<>...</>): the fragment
 // pragma resolves to `React.Fragment`, which is *not* global.
 
+// `run` executes a shell command from the widget. Übersicht marks "uebersicht"
+// external when it bundles a widget and supplies it at runtime, so importing it
+// here — in the shared kit — resolves exactly as it would in a widget's own file.
+import { run } from "uebersicht";
+
 const DEFAULT_PORT = 4318; // must match WIDGET_HOST_PORT in the helper
 const DEFAULT_HOST = "127.0.0.1";
 
@@ -33,6 +38,17 @@ export function parseOutput(output) {
   } catch (e) {
     return { offline: false, error: "Could not parse helper response.", data: null };
   }
+}
+
+// -------------------------------------------------------------- interaction
+
+// Open a URL in the default browser. `run` goes through a shell, so the URL is
+// single-quoted rather than interpolated bare: these strings come back from an
+// API, and one containing a backtick or $(…) would otherwise execute.
+export function openUrl(url) {
+  if (!url) return;
+  const quoted = "'" + String(url).replace(/'/g, "'\\''") + "'";
+  run(`open ${quoted}`);
 }
 
 // ---------------------------------------------------------------- formatting
@@ -166,6 +182,11 @@ export const baseCss = `
   }
   .wk-bar-fill-sub { height: 100%; border-radius: 3px; background: #64748B; transition: width 0.4s ease; }
   .wk-bar-caption { font-size: 10px; color: #6B7280; margin-top: 4px; }
+
+  /* A row that opens something on click. The negative margin lets the hover
+     highlight bleed past the text without widening the row's own box. */
+  .wk-click { cursor: pointer; border-radius: 8px; margin: 0 -8px; padding: 0 8px; }
+  .wk-click:hover { background: rgba(255, 255, 255, 0.08); }
 
   .wk-message { padding: 6px 2px; font-size: 12px; color: var(--wk-muted); line-height: 1.5; }
   .wk-message code { color: #ECECEC; background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 4px; }
