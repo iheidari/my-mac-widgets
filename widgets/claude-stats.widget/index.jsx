@@ -9,7 +9,6 @@ import {
   parseOutput,
   baseCss,
   fmt,
-  usd,
   hour,
   relTime,
   Card,
@@ -33,7 +32,23 @@ export const className = `
   left: 40px;
   width: 320px;
   ${baseCss}
+
+  /* Six tiles in a 3x2 grid: the kit's default tile is sized for two columns,
+     so shrink it here rather than in the kit (linear/system-status still want
+     the roomier default). */
+  .wk-grid { gap: 8px; }
+  .wk-tile { padding: 7px 8px; border-radius: 10px; }
+  .wk-tile .v { font-size: 16px; }
+  .wk-tile .l { font-size: 9px; letter-spacing: 0.4px; margin-top: 2px; }
 `;
+
+// Whole dollars — cents are noise on a lifetime estimate, and the narrower
+// string fits the 3-column tile. (The kit's usd() keeps them for widgets
+// where the cents mean something.)
+function usdWhole(n) {
+  if (n == null) return "—";
+  return "$" + Math.round(Number(n)).toLocaleString("en-US");
+}
 
 function shortModel(m) {
   if (!m) return "—";
@@ -86,11 +101,11 @@ export const render = ({ output }) => {
 
   return (
     <Card title={TITLE} live={live} dotTitle={live ? "Live telemetry" : "Files only"}>
-      <Grid columns={2}>
+      <Grid columns={3}>
         <Tile value={fmt(s.sessions)} label="Sessions" />
         <Tile value={fmt(s.messages)} label="Messages" />
         <Tile value={fmt(t.total)} label="Tokens" />
-        <Tile value={usd(s.cost)} label="Est. Cost" color="#FBBF24" />
+        <Tile value={usdWhole(s.cost)} label="Est. Cost" color="#FBBF24" />
         <Tile value={`${fmt(s.currentStreak)}🔥`} label="Day Streak" color="#F97316" />
         <Tile value={hour(s.peakHour)} label="Peak Hour" />
       </Grid>

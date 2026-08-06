@@ -42,9 +42,10 @@ export const refreshFrequency = 60000; // 60s
 // system-status to the bottom, so centring keeps this clear of both regardless
 // of how tall either grows.
 export const className = `
-  left: 40px;
-  top: 50%;
-  transform: translateY(-50%);
+  /* Right of claude-stats (left 40 + width 320 + 40 gutter), tops aligned, so
+     the two never overlap however tall either card grows. */
+  left: 400px;
+  top: 40px;
   width: 320px;
   ${baseCss}
 
