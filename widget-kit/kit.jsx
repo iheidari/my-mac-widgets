@@ -51,6 +51,15 @@ export function openUrl(url) {
   run(`open ${quoted}`);
 }
 
+// Launch (or focus) a local app by name, e.g. openApp("Activity Monitor").
+// Same quoting rationale as openUrl even though callers pass constants today —
+// cheap insurance against a future caller wiring in API-sourced data.
+export function openApp(name) {
+  if (!name) return;
+  const quoted = "'" + String(name).replace(/'/g, "'\\''") + "'";
+  run(`open -a ${quoted}`);
+}
+
 // Manual refresh: drop the provider's cached payload, then ask Übersicht to
 // re-run this widget's command so the new numbers land now rather than at the
 // next poll. Two steps in one shell command, sequenced so the re-poll sees the
@@ -220,6 +229,12 @@ export const baseCss = `
   .wk-click { cursor: pointer; border-radius: 8px; margin: 0 -8px; padding: 0 8px; }
   .wk-click:hover { background: rgba(255, 255, 255, 0.08); }
 
+  /* Whole-card click affordance (Card's onClick). A separate class from
+     .wk-click: that one's negative margin/padding is sized for a row nested
+     inside a padded card, and would fight .wk-card's own padding here. */
+  .wk-card-click { cursor: pointer; }
+  .wk-card-click:hover { background: rgba(32, 35, 44, 0.72); }
+
   .wk-message { padding: 6px 2px; font-size: 12px; color: var(--wk-muted); line-height: 1.5; }
   .wk-message code { color: #ECECEC; background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 4px; }
 `;
@@ -250,9 +265,15 @@ function RefreshButton({ onRefresh, title }) {
 
 // The frosted panel every widget sits in. `live` drives the status dot;
 // pass null to omit the dot entirely. `onRefresh` adds the manual-refresh ↻.
-export function Card({ title, live, dotTitle, onRefresh, refreshTitle, children }) {
+// `onClick` is opt-in (e.g. open an app) — omit it and the card is inert, as
+// before.
+export function Card({ title, live, dotTitle, onRefresh, refreshTitle, onClick, clickTitle, children }) {
   return (
-    <div className="wk-card">
+    <div
+      className={"wk-card" + (onClick ? " wk-card-click" : "")}
+      onClick={onClick}
+      title={onClick ? clickTitle : null}
+    >
       {title != null && (
         <div className="wk-head">
           <span className="wk-title">{title}</span>

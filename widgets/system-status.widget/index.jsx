@@ -9,6 +9,7 @@ import {
   parseOutput,
   baseCss,
   relTime,
+  openApp,
   Card,
   Grid,
   Tile,
@@ -68,7 +69,13 @@ export const render = ({ output }) => {
   const dotTitle = internet.checkedAt ? `${net.title} · ${relTime(internet.checkedAt)}` : net.title;
 
   return (
-    <Card title={TITLE} live={internet.online === true} dotTitle={dotTitle}>
+    <Card
+      title={TITLE}
+      live={internet.online === true}
+      dotTitle={dotTitle}
+      onClick={() => openApp("Activity Monitor")}
+      clickTitle="Open Activity Monitor"
+    >
       <Grid columns={2}>
         <Tile value={data.uptime?.text || "—"} label="Uptime" />
         <Tile value={net.label} label="Internet" color={net.color} />
