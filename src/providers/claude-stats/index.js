@@ -1,19 +1,19 @@
 'use strict';
 
-// Claude Code usage statistics — fuses three independent sources into one
-// payload: parsed local ~/.claude files, live OTLP telemetry Claude Code posts
-// to this same server, and the account's plan usage limits.
+// Agent usage statistics — fuses parsed local Claude files, live Claude OTLP
+// telemetry, and the account's Claude + Codex plan usage limits.
 
 const { memoizeAsync } = require('../../core/cache');
 const { STATS_TTL_MS, CLAUDE_DIR } = require('./config');
 const { collectStats } = require('./parser');
 const { TelemetryStore } = require('./telemetry/otlpReceiver');
 const { getPlanLimitsCached } = require('./planLimits');
+const { getCodexLimitsCached } = require('./codexLimits');
 
 // In-memory only, for the life of the process — nothing is persisted.
 const telemetry = new TelemetryStore();
 
-// The three sources have three different natural cadences, so this provider owns
+// The sources have different natural cadences, so this provider owns
 // its own caching (ttlMs: 0 below) instead of letting the host freeze the whole
 // payload: the file scan is expensive and happily 30s stale, plan limits keep
 // their own 180s cache, but the telemetry snapshot is free and must be live —
@@ -37,12 +37,16 @@ function fmtHour(h) {
 
 module.exports = {
   id: 'claude-stats',
-  title: 'Claude Code',
+  title: 'Agent Widget',
   ttlMs: 0, // cached per-source above, not per-payload
 
   async collect() {
-    const [fileStats, planLimits] = await Promise.all([readFileStats(), getPlanLimitsCached()]);
-    return { ...fileStats, telemetry: telemetry.snapshot(), planLimits };
+    const [fileStats, planLimits, codexLimits] = await Promise.all([
+      readFileStats(),
+      getPlanLimitsCached(),
+      getCodexLimitsCached(),
+    ]);
+    return { ...fileStats, telemetry: telemetry.snapshot(), planLimits, codexLimits };
   },
 
   routes: [

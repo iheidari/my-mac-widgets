@@ -5,9 +5,8 @@ widgets: **one** local Node helper serves **many** widgets, and a shared widget
 kit means a new widget is a data function plus a layout — not another 300 lines
 of CSS.
 
-The widget it ships with shows your **Claude Code** usage statistics — sessions,
-messages, tokens, estimated cost, streaks, peak hour, favorite model, and live
-plan-limit bars — right on your wallpaper.
+The **Agent Widget** it ships with shows live Claude Code and Codex plan-usage
+bars — right on your wallpaper.
 
 **Adding a widget is two commands:**
 
@@ -25,7 +24,7 @@ edits to the server, no new launchd service.
 
 ## How it fits together
 
-The Claude Code widget fuses **three** independent sources, which is a good
+The Agent Widget fuses **four** independent sources, which is a good
 illustration of what a provider can do:
 
 1. **Parses your local files** — `~/.claude/projects/**/*.jsonl`,
@@ -37,12 +36,15 @@ illustration of what a provider can do:
    widget updates as you work.
 3. **Reads your plan usage limits** — the live session and weekly rate-limit
    windows, so the widget can show how much of each you have left.
+4. **Reads Codex plan usage limits** — the 5-hour and weekly windows from the
+   same ChatGPT backend used by the official Codex clients.
 
 ```
 src/providers/claude-stats/  ─┐
   ~/.claude/*.jsonl  (parse)  │      ┌──────────────────────────────┐
   OTLP metrics       (push)   ├─────▶│  widget helper               │
   /api/oauth/usage   (fetch)  │      │  (Node, zero deps, one port) │
+  /backend-api/wham/usage     │      │                              │
                              ─┘      │                              │
 src/providers/<yours>/  ─────────────▶│  GET /stats/<id> ───────────┼──▶ widgets/<id>.widget
                                       │  GET /stats      (default)  │      + widget-kit/
@@ -96,7 +98,7 @@ to one data source lives in its own provider folder.
 | `src/core/cache.js` | TTL memoization with in-flight de-duplication |
 | `src/core/config.js` | Port, host, default provider, allow/deny lists |
 | `src/cli.js` | CLI: `serve` (default), `list`, `print`, `parse`, `help` |
-| `src/providers/claude-stats/` | The Claude Code data source (parser, telemetry, pricing, plan limits) |
+| `src/providers/claude-stats/` | The Agent Widget data source (Claude stats/limits + Codex limits) |
 | `src/providers/linear-stats/` | Per-project Linear ticket counts (GraphQL, Keychain-stored API key) |
 | `src/providers/system-status/` | Uptime, memory, disk and connectivity |
 | `widgets/<id>.widget/` | One Übersicht widget per folder |
@@ -244,12 +246,24 @@ node src/cli.js print
     "tokens": { "input": 12000, "output": 3400, … },
     "activeTimeSeconds": 900
   },
+  "planLimits": {                        // Claude Code usage windows
+    "available": true,
+    "bars": [{ "id": "five_hour", "usedPercent": 35, "resetAt": "…" }]
+  },
+  "codexLimits": {                       // Codex usage windows
+    "available": true,
+    "bars": [
+      { "id": "primary", "label": "5-hour limit", "usedPercent": 20, "resetAt": "…" },
+      { "id": "secondary", "label": "Weekly limit", "usedPercent": 7, "resetAt": "…" }
+    ]
+  },
   "generatedAt": "2026-07-03T…Z"
 }
 ```
 
-Each provider payload is cached for its `ttlMs` (30s here, `CLAUDE_STATS_TTL_MS`), and
-concurrent pollers share one fetch, so polling every 10s is cheap.
+The mixed-cadence payload is assembled on each poll, while its expensive sources
+cache independently: Claude files for `CLAUDE_STATS_TTL_MS` and both usage APIs
+for at least 180 seconds. Concurrent pollers share in-flight work.
 
 ---
 
@@ -278,7 +292,7 @@ as you work. The widget's status dot turns green when live telemetry is flowing.
 
 ---
 
-## Plan usage limits (live session + weekly bars)
+## Claude plan usage limits
 
 The widget can also show your **plan rate-limit** status — the same bars as
 Claude Code's `/usage` panel: current-session %, weekly (all models) %, and
@@ -360,6 +374,21 @@ out and force you to sign in again.
 
 ---
 
+## Codex plan usage limits
+
+The Codex section shows the 5-hour and weekly windows from Codex's ChatGPT
+usage backend. The helper reads `tokens.access_token` and `tokens.account_id`
+from `~/.codex/auth.json`, sends them only to `chatgpt.com`, and never returns,
+logs, refreshes, or writes the credential. If either value is unavailable, it
+makes no request and simply omits the Codex section.
+
+Successful responses are cached for at least 180 seconds; transient failures
+retry after 20 seconds by default. Failed refreshes retain the last good bars,
+dimmed and time-stamped, for up to two hours. Like Claude's personal-usage
+endpoint, this is an internal client API and can change without notice.
+
+---
+
 ## Linear project stats
 
 The `linear-stats` widget lists every open Linear project with three counts:
@@ -428,6 +457,10 @@ still exists and warns you instead of quietly showing `0`. If you rename it, set
 | `CLAUDE_STATS_USER_AGENT` | `claude-code/<detected>` | User-Agent sent to the usage endpoint |
 | `CLAUDE_STATS_AUTO_REFRESH` | (off) | Set to `1` to let the helper renew and re-store the OAuth token — see the warning above |
 | `CLAUDE_STATS_OAUTH_CLIENT_ID` | (Claude Code's) | OAuth client id used when auto-refresh redeems the refresh token |
+| `CODEX_HOME` | `~/.codex` | Directory containing Codex's `auth.json` |
+| `CODEX_LIMITS_TTL_MS` | `180000` | Codex usage refresh interval (min 180s — enforced) |
+| `CODEX_LIMITS_ERROR_TTL_MS` | `20000` | Back-off before retrying after a failed Codex poll |
+| `CODEX_LIMITS_TIMEOUT_MS` | `3000` | Codex request deadline (capped at 3s to fit the widget poll budget) |
 
 **The `linear-stats` provider:**
 

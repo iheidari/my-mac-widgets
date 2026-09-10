@@ -80,6 +80,12 @@ fs.writeFileSync(path.join(tmp, 'stats-cache.json'), JSON.stringify({ totalSessi
 
 process.env.CLAUDE_CONFIG_DIR = tmp;
 
+// Never let provider tests discover the developer's real Codex login. Focused
+// Codex tests inject fixture credentials and responses below.
+const codexTmp = path.join(tmp, 'codex');
+fs.mkdirSync(codexTmp, { recursive: true });
+process.env.CODEX_HOME = codexTmp;
+
 // ---- Hermetic credential environment ----
 //
 // planLimits discovers a credential in three steps: CLAUDE_CODE_OAUTH_TOKEN →
@@ -111,6 +117,21 @@ childProcess.execFileSync = (file, args, opts) => {
 
 // ---- Tests ----
 (async () => {
+  console.log('\nAgent widget');
+
+  await test('presents only Claude and Codex usage under the Agent Widget title', () => {
+    const { presentAgentWidget } = require('../widgets/claude-stats.widget/view');
+    const view = presentAgentWidget({
+      planLimits: { available: true, bars: [{ id: 'five_hour' }] },
+      codexLimits: { available: true, bars: [{ id: 'primary' }] },
+    });
+    assert.strictEqual(view.title, 'Agent Widget');
+    assert.deepStrictEqual(view.sections.map((section) => section.name), ['Claude', 'Codex']);
+    assert.deepStrictEqual(Object.keys(view).sort(), ['dotTitle', 'live', 'sections', 'title']);
+    const widgetSource = fs.readFileSync(path.join(__dirname, '../widgets/claude-stats.widget/index.jsx'), 'utf8');
+    assert.doesNotMatch(widgetSource, /\b(?:Grid|Tile|Foot)\b/, 'widget must not render statistics or a footer');
+  });
+
   console.log('\nParser');
 
   const { parseSessions } = require('../src/providers/claude-stats/parser/sessions');
@@ -452,6 +473,111 @@ childProcess.execFileSync = (file, args, opts) => {
     }
   });
 
+  console.log('\nCodex limits (/wham/usage parsing, no network)');
+  const cl = require('../src/providers/claude-stats/codexLimits');
+  await test('extracts only the Codex access-token/account tuple', () => {
+    assert.deepStrictEqual(
+      cl.extractCredential(JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: { access_token: 'secret', account_id: 'account-123', refresh_token: 'never-exported' },
+      })),
+      { accessToken: 'secret', accountId: 'account-123', source: 'file' }
+    );
+  });
+  await test('normalizes Codex primary and secondary usage windows', () => {
+    const bars = cl.usageToBars({
+      rate_limit: {
+        primary_window: { used_percent: 20, limit_window_seconds: 18_000, reset_after_seconds: 300 },
+        secondary_window: { used_percent: 7, limit_window_seconds: 604_800, reset_after_seconds: 600 },
+      },
+    });
+    assert.deepStrictEqual(bars.map((bar) => [bar.id, bar.label, bar.usedPercent, bar.windowSeconds]), [
+      ['primary', '5-hour limit', 20, 18_000],
+      ['secondary', 'Weekly limit', 7, 604_800],
+    ]);
+  });
+  await test('Codex missing credential performs no request', async () => {
+    let requests = 0;
+    const result = await cl.runFetch(() => null, async () => { requests += 1; });
+    assert.strictEqual(result.available, false);
+    assert.strictEqual(requests, 0);
+  });
+  await test('Codex null and blank wire values do not become zero-usage bars', () => {
+    const bars = cl.usageToBars({
+      rate_limit: {
+        primary_window: { used_percent: null, limit_window_seconds: '', reset_at: '' },
+      },
+    });
+    assert.deepStrictEqual(bars, []);
+  });
+  await test('Codex retries once when the credential rotates during a request', async () => {
+    let reads = 0;
+    const find = () => ({
+      accessToken: reads++ === 0 ? 'stale' : 'fresh',
+      accountId: 'account-123',
+      source: 'file',
+    });
+    const seen = [];
+    const request = async (credential) => {
+      seen.push(credential.accessToken);
+      if (credential.accessToken === 'stale') return { status: 401, body: '' };
+      return {
+        status: 200,
+        body: JSON.stringify({
+          plan_type: 'plus',
+          rate_limit: { primary_window: { used_percent: 12, limit_window_seconds: 18_000 } },
+        }),
+      };
+    };
+    const result = await cl.runFetch(find, request);
+    assert.deepStrictEqual(seen, ['stale', 'fresh']);
+    assert.strictEqual(result.available, true);
+  });
+  await test('Codex auth errors use the short retry window', () => {
+    process.env.CODEX_LIMITS_ERROR_TTL_MS = '1234';
+    assert.strictEqual(cl.ttlFor({ available: false, status: 401 }), 1234);
+    delete process.env.CODEX_LIMITS_ERROR_TTL_MS;
+  });
+  await test('Codex rejected refresh keeps the last good bars as stale', async () => {
+    cl._resetCache();
+    const good = {
+      available: true,
+      error: null,
+      plan: 'plus',
+      bars: [{ id: 'primary', usedPercent: 44 }],
+      updatedAt: new Date().toISOString(),
+    };
+    await cl.getCodexLimitsCached(async () => good);
+    cl._expireCache();
+    const stale = await cl.getCodexLimitsCached(async () => { throw new Error('network down'); });
+    assert.strictEqual(stale.available, false);
+    assert.strictEqual(stale.stale, true);
+    assert.strictEqual(stale.bars[0].usedPercent, 44);
+    cl._resetCache();
+  });
+  await test('Codex request deadline cannot exceed the widget poll budget', () => {
+    process.env.CODEX_LIMITS_TIMEOUT_MS = '9000';
+    assert.strictEqual(cl.requestTimeoutMs(), 3000);
+    delete process.env.CODEX_LIMITS_TIMEOUT_MS;
+  });
+  await test('Codex credential retry shares one overall request deadline', async () => {
+    process.env.CODEX_LIMITS_TIMEOUT_MS = '100';
+    let reads = 0;
+    const timeouts = [];
+    const result = await cl.runFetch(
+      () => ({ accessToken: reads++ === 0 ? 'stale' : 'fresh', accountId: 'account-123', source: 'file' }),
+      async (_credential, timeoutMs) => {
+        timeouts.push(timeoutMs);
+        if (timeouts.length === 1) await new Promise((resolve) => setTimeout(resolve, 25));
+        return { status: 401, body: '' };
+      }
+    );
+    assert.strictEqual(result.available, false);
+    assert.strictEqual(timeouts.length, 2);
+    assert.ok(timeouts[1] < timeouts[0], `${timeouts[1]} should be less than ${timeouts[0]}`);
+    delete process.env.CODEX_LIMITS_TIMEOUT_MS;
+  });
+
   console.log('\nCore cache');
   const { memoizeAsync } = require('../src/core/cache');
   await test('reuses the value inside the ttl, refetches after invalidate', async () => {
@@ -494,6 +620,27 @@ childProcess.execFileSync = (file, args, opts) => {
     assert.strictEqual(await read(), null);
     assert.strictEqual(await read(), null);
     assert.strictEqual(calls, 1);
+  });
+  await test('adaptive cache cannot let an expired request overwrite a newer result', async () => {
+    const { createAdaptiveCache } = require('../src/core/adaptiveCache');
+    let resolveOld;
+    let resolveFresh;
+    const old = new Promise((resolve) => { resolveOld = resolve; });
+    const fresh = new Promise((resolve) => { resolveFresh = resolve; });
+    const cache = createAdaptiveCache({
+      load: () => old,
+      ttlFor: () => 60_000,
+      isGood: () => true,
+      errorValue: (err) => ({ error: err.message }),
+    });
+    const oldRead = cache.get();
+    cache.expire();
+    const freshRead = cache.get(() => fresh);
+    resolveFresh('fresh');
+    assert.strictEqual(await freshRead, 'fresh');
+    resolveOld('old');
+    assert.strictEqual(await oldRead, 'old');
+    assert.strictEqual(await cache.get(), 'fresh');
   });
 
   console.log('\nSystem status');
@@ -1050,12 +1197,14 @@ childProcess.execFileSync = (file, args, opts) => {
   await test('POST /v1/metrics accepts OTLP json', () => assert.strictEqual(post.status, 200));
 
   const statsRes = await req('GET', '/stats');
-  await test('/stats merges files + telemetry + planLimits', () => {
+  await test('/stats merges files + telemetry + Claude and Codex limits', () => {
     assert.ok(statsRes.body.sessions >= 0);
     assert.strictEqual(statsRes.body.telemetry.costUsage, 1.5);
     assert.strictEqual(statsRes.body.telemetry.available, true);
     assert.ok(statsRes.body.planLimits, 'planLimits present');
     assert.strictEqual(statsRes.body.planLimits.available, false); // no token in test env
+    assert.ok(statsRes.body.codexLimits, 'codexLimits present');
+    assert.strictEqual(statsRes.body.codexLimits.available, false); // no token in test env
   });
 
   const byIdRes = await req('GET', '/stats/claude-stats');
