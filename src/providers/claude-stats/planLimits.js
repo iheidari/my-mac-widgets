@@ -14,6 +14,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
+const { createAdaptiveCache } = require('../../core/adaptiveCache');
 const { execFileSync } = require('child_process');
 
 const API_HOST = 'api.anthropic.com';
@@ -457,23 +458,16 @@ async function fetchPlanLimits() {
 
 // ---- Adaptive cache ---------------------------------------------------------
 
-let cache = { value: null, at: 0, inflight: null };
-
 // Last successful reading, kept so a failed poll degrades to "stale bars" instead
 // of blanking the widget. Bars are 5h/7d windows — a 10-minute-old number is far
 // more useful than nothing — but we stop serving them after STALE_MAX_MS, past
 // which the session window may have reset and the percentages become misleading.
-let lastGood = null; // { value, at }
 const STALE_MAX_MS = 2 * 60 * 60 * 1000;
 
 // Record successes; on failure, fall back to the last good bars marked `stale`.
 // `available` stays false so consumers can tell this is not a live reading.
-function withStale(value) {
-  if (value?.available && value.bars?.length) {
-    lastGood = { value, at: Date.now() };
-    return value;
-  }
-  if (!lastGood || Date.now() - lastGood.at >= STALE_MAX_MS) return value;
+function mergeStale(value, lastGood, now) {
+  if (now - lastGood.at >= STALE_MAX_MS) return value;
   return {
     ...value,
     bars: lastGood.value.bars,
@@ -508,39 +502,25 @@ function ttlFor(value) {
 
 // `_fetch` is injectable so the adaptive-TTL behavior can be tested without a real
 // keychain or network (see test/run.js).
-async function getPlanLimitsCached(_fetch = fetchPlanLimits) {
-  const now = Date.now();
-  if (cache.value && now - cache.at < ttlFor(cache.value)) return cache.value;
-  if (cache.inflight) return cache.inflight;
-  cache.inflight = _fetch()
-    .then((raw) => {
-      const value = withStale(raw);
-      cache = { value, at: Date.now(), inflight: null };
-      return value;
-    })
-    // fetchPlanLimits catches all its own failures and always resolves a
-    // normalized object, so this .catch is effectively unreachable. It's kept
-    // deliberately to mirror the shared memoization shape in parser/index.js
-    // (see CLAUDE.md "Caching") — do not remove it as dead code. The value has no
-    // `status`, so ttlFor treats it as a short-lived error — it never pins the cache.
-    .catch((err) => {
-      const value = { available: false, error: String((err && err.message) || err), bars: [] };
-      cache = { value, at: Date.now(), inflight: null };
-      return value;
-    });
-  return cache.inflight;
-}
+const limitsCache = createAdaptiveCache({
+  load: fetchPlanLimits,
+  ttlFor,
+  isGood: (value) => Boolean(value?.available && value.bars?.length),
+  mergeStale,
+  errorValue: (err) => ({ available: false, error: String((err && err.message) || err), bars: [] }),
+});
+
+const getPlanLimitsCached = limitsCache.get;
 
 // Test hook: drop the memoized value so cache-behavior tests start clean.
 function _resetCache() {
-  cache = { value: null, at: 0, inflight: null };
-  lastGood = null;
+  limitsCache.reset();
 }
 
 // Test hook: expire the memoized value but KEEP lastGood, so the stale-fallback
 // path can be exercised (TTL_MS is frozen at load, so env can't force a re-fetch).
 function _expireCache() {
-  cache = { value: null, at: 0, inflight: null };
+  limitsCache.expire();
 }
 
 module.exports = {

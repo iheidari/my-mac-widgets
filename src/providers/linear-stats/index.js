@@ -10,6 +10,7 @@
 const { findApiKey, KEYCHAIN_SERVICE } = require('./credential');
 const { fetchWorkspace, isAuthError } = require('./linear');
 const { aggregate } = require('./aggregate');
+const { createAdaptiveCache } = require('../../core/adaptiveCache');
 
 // ---- Fetch ------------------------------------------------------------------
 
@@ -60,15 +61,11 @@ async function runFetch(find = findApiKey, fetchFn = fetchWorkspace) {
 // successes and failures, and needs to keep serving the last good counts when a
 // poll fails. `ttlMs: 0` below keeps the host's in-flight de-duplication.
 
-let cache = { value: null, at: 0, inflight: null };
-
 // Last successful reading. A failed poll degrades to these counts — dimmed and
 // tagged with their age — rather than blanking the widget. Unlike the plan-limit
 // bars there is no expiry cap: a ticket count from this morning is still a true
 // statement about this morning, whereas a usage percentage from before a window
 // reset is actively wrong.
-let lastGood = null; // { value, at }
-
 const TTL_MS = Math.max(30_000, Number(process.env.LINEAR_STATS_TTL_MS) || 300_000);
 
 // Failure TTL, re-read per call so a test can flip it. A transient failure must
@@ -89,12 +86,7 @@ function ttlFor(value) {
   return errorTtlMs();
 }
 
-function withStale(value) {
-  if (value && value.available && value.rows && value.rows.length) {
-    lastGood = { value, at: Date.now() };
-    return value;
-  }
-  if (!lastGood) return value;
+function mergeStale(value, lastGood) {
   return {
     ...value,
     rows: lastGood.value.rows,
@@ -107,30 +99,23 @@ function withStale(value) {
   };
 }
 
-async function getCached(_fetch = runFetch) {
-  const now = Date.now();
-  if (cache.value && now - cache.at < ttlFor(cache.value)) return cache.value;
-  if (cache.inflight) return cache.inflight;
-  cache.inflight = _fetch()
-    .then((raw) => {
-      const value = withStale(raw);
-      cache = { value, at: Date.now(), inflight: null };
-      return value;
-    })
-    // runFetch normalizes its own failures, so this is defensive rather than
-    // reachable — it mirrors the shape in planLimits.js. The value carries no
-    // `auth`/`status`, so it expires on the short error TTL and never pins.
-    .catch((err) => {
-      const value = withStale({ available: false, error: String((err && err.message) || err), rows: [], totals: null });
-      cache = { value, at: Date.now(), inflight: null };
-      return value;
-    });
-  return cache.inflight;
-}
+const statsCache = createAdaptiveCache({
+  load: runFetch,
+  ttlFor,
+  isGood: (value) => Boolean(value && value.available && value.rows && value.rows.length),
+  mergeStale,
+  errorValue: (err) => ({
+    available: false,
+    error: String((err && err.message) || err),
+    rows: [],
+    totals: null,
+  }),
+});
+
+const getCached = statsCache.get;
 
 function _resetCache() {
-  cache = { value: null, at: 0, inflight: null };
-  lastGood = null;
+  statsCache.reset();
 }
 
 // Expire the memo but KEEP lastGood: the next read re-fetches, and if that fetch
@@ -141,7 +126,7 @@ function _resetCache() {
 // An in-flight fetch is carried over rather than dropped, so two refreshes in a
 // row de-duplicate onto one Linear request instead of racing.
 function invalidate() {
-  cache = { value: null, at: 0, inflight: cache.inflight };
+  statsCache.expire({ preserveInflight: true });
 }
 
 async function collect() {

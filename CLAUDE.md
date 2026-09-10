@@ -77,9 +77,9 @@ The port `4318` is deliberately the OTLP/HTTP default: the same server receives 
 
 ### Caching
 
-`src/core/cache.js` (`memoizeAsync`) is the one place the TTL + in-flight-dedup pattern lives: return the cached value if fresh, return the in-flight promise if a fetch is already running, otherwise start one. The registry wraps every provider's `collect()` in it, so providers should **not** cache internally — `parser/index.js` deliberately doesn't.
+`src/core/cache.js` (`memoizeAsync`) owns simple TTL + in-flight de-duplication. `src/core/adaptiveCache.js` owns the richer provider pattern: per-result TTLs, last-good projection, and invalidation that prevents obsolete in-flight results from overwriting newer reads. Do not hand-roll either state machine in a provider.
 
-A provider whose payload mixes cadences opts out with **`ttlMs: 0`**, which disables the host's TTL while keeping in-flight de-duplication, and caches each source itself. `claude-stats` does this: the file scan is memoized at `STATS_TTL_MS`, `planLimits.js` keeps its own cache (richer semantics — stale-while-error retention, error back-off; leave it alone), and the telemetry snapshot is deliberately **not** cached. Freezing that snapshot inside a whole-payload memo is a regression that looks like nothing: Claude Code posts metrics every 15s and the widget's live indicator reads them, so a 30s payload TTL makes "live" telemetry up to 30s stale, including the first ingest.
+A provider whose payload mixes cadences opts out with **`ttlMs: 0`**, which disables the host's TTL while keeping in-flight de-duplication, and caches each source itself. `claude-stats` does this: the file scan is memoized at `STATS_TTL_MS`, Claude and Codex limits use `createAdaptiveCache`, and the telemetry snapshot is deliberately **not** cached. Freezing that snapshot inside a whole-payload memo would make ingested telemetry stale. The Agent Widget's status dot is based on fresh usage-limit sections, not telemetry.
 
 ### The widget kit
 
@@ -96,16 +96,22 @@ Each `widgets/<id>.widget/kit.jsx` is a **symlink** to `widget-kit/kit.jsx`; `de
 
 - Components defined in the kit work exactly as in-widget ones.
 - **Do not use JSX fragments** (`<>…</>`) anywhere in widgets or the kit — the fragment pragma resolves to `React.Fragment`, which is *not* global.
+- Put widget-local helper modules under `lib/` (or `src/`), never at the widget-folder root. Übersicht recursively treats every root `.coffee`, `.js`, and `.jsx` file as a standalone widget; a CommonJS helper there is wrapped as a legacy widget and fails with a misleading parse error.
 
 To verify a widget compiles without launching Übersicht, bundle it with Übersicht's own toolchain from `/Applications/Übersicht.app/Contents/Resources/node_modules` (browserify + babelify, presets `@babel/preset-env` targeting `last 4 Safari versions` and `@babel/preset-react` with `{pragma: 'html'}`).
 
 ## The `claude-stats` provider
 
-Fuses **three independent data sources** into one payload:
+Fuses **four independent data sources** into one payload:
 
 1. **Local file parsing** (`parser/`) — the historical picture (streaks, peak hour, favorite model, lifetime tokens/cost). Reads `~/.claude/projects/**/*.jsonl`, `history.jsonl`, `stats-cache.json`.
 2. **Live OTLP telemetry** (`telemetry/otlpReceiver.js`) — Claude Code POSTs OpenTelemetry metrics to `/v1/metrics` as they happen. Held in memory only (`TelemetryStore`); nothing is persisted.
 3. **Plan usage limits** (`planLimits.js`) — live session/weekly rate-limit bars from Anthropic's `/api/oauth/usage` endpoint.
+4. **Codex plan limits** (`codexLimits.js`) — live 5-hour/weekly bars from Codex's ChatGPT usage backend using the existing `~/.codex/auth.json` access token and account id.
+
+The widget is displayed as **Agent Widget** and renders only the Claude and
+Codex usage sections. The provider id and widget folder remain `claude-stats`
+for compatibility with existing installs and URLs.
 
 ### Parsing is defensive by design
 
@@ -179,7 +185,7 @@ A Linear personal API key carries the user's full workspace permissions — Line
 
 - All source uses `'use strict'` CommonJS. Match the existing terse, comment-the-why style.
 - Host env overrides: `WIDGET_HOST_PORT`, `WIDGET_HOST_HOST`, `WIDGET_HOST_DEFAULT_PROVIDER`, `WIDGET_HOST_PROVIDERS` (allow-list), `WIDGET_HOST_DISABLE` (deny-list). `CLAUDE_STATS_PORT`/`CLAUDE_STATS_HOST` remain as fallbacks.
-- `claude-stats` env overrides: `CLAUDE_CONFIG_DIR` (relocates `~/.claude`), `CLAUDE_STATS_TTL_MS`, `CLAUDE_STATS_LIMITS_TTL_MS`, `CLAUDE_STATS_LIMITS_ERROR_TTL_MS`, `CLAUDE_STATS_PLAN_LIMITS=off`, `CLAUDE_STATS_USER_AGENT`, `CLAUDE_STATS_AUTO_REFRESH`, `CLAUDE_STATS_OAUTH_CLIENT_ID`. Tests drive the parser by pointing `CLAUDE_CONFIG_DIR` at a temp fixture. New providers should namespace their own vars the same way.
+- `claude-stats` env overrides: `CLAUDE_CONFIG_DIR` (relocates `~/.claude`), `CLAUDE_STATS_TTL_MS`, `CLAUDE_STATS_LIMITS_TTL_MS`, `CLAUDE_STATS_LIMITS_ERROR_TTL_MS`, `CLAUDE_STATS_PLAN_LIMITS=off`, `CLAUDE_STATS_USER_AGENT`, `CLAUDE_STATS_AUTO_REFRESH`, `CLAUDE_STATS_OAUTH_CLIENT_ID`, `CODEX_HOME`, `CODEX_LIMITS_TTL_MS`, `CODEX_LIMITS_ERROR_TTL_MS`, `CODEX_LIMITS_TIMEOUT_MS`. Tests drive both credential roots into temp fixtures before loading providers. New providers should namespace their own vars the same way.
 - `system-status` env overrides: `SYSTEM_STATUS_DISK_VOLUME`, `SYSTEM_STATUS_PROBE_URL`, `SYSTEM_STATUS_PROBE_INTERVAL_MS`, `SYSTEM_STATUS_PROBE_OFFLINE_INTERVAL_MS`, `SYSTEM_STATUS_RETRY_DELAY_MS`, `SYSTEM_STATUS_RETRIES`, `SYSTEM_STATUS_IDLE_STOP_MS`.
 - `linear-stats` env overrides: `LINEAR_API_KEY`, `LINEAR_STATS=off`, `LINEAR_STATS_TTL_MS`, `LINEAR_STATS_ERROR_TTL_MS`, `LINEAR_STATS_REVIEW_STATES` (comma-separated state names), `LINEAR_STATS_READY_LABEL`.
 - The launchd service is `com.uebersicht-widgets.helper` (logs in `~/Library/Logs/uebersicht-widgets/`). `install.sh` removes the legacy `com.claude-stats.helper` so the two can't fight over the port.
