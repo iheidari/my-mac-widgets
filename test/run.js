@@ -120,7 +120,7 @@ childProcess.execFileSync = (file, args, opts) => {
   console.log('\nAgent widget');
 
   await test('presents only Claude and Codex usage under the Agent Widget title', () => {
-    const { presentAgentWidget } = require('../widgets/claude-stats.widget/view');
+    const { presentAgentWidget } = require('../widgets/claude-stats.widget/lib/view');
     const view = presentAgentWidget({
       planLimits: { available: true, bars: [{ id: 'five_hour' }] },
       codexLimits: { available: true, bars: [{ id: 'primary' }] },
@@ -130,6 +130,13 @@ childProcess.execFileSync = (file, args, opts) => {
     assert.deepStrictEqual(Object.keys(view).sort(), ['dotTitle', 'live', 'sections', 'title']);
     const widgetSource = fs.readFileSync(path.join(__dirname, '../widgets/claude-stats.widget/index.jsx'), 'utf8');
     assert.doesNotMatch(widgetSource, /\b(?:Grid|Tile|Foot)\b/, 'widget must not render statistics or a footer');
+  });
+  await test('does not expose helper JavaScript as a standalone Übersicht widget', () => {
+    const widgetDir = path.join(__dirname, '../widgets/claude-stats.widget');
+    const entryFiles = new Set(['index.jsx', 'kit.jsx']);
+    const standaloneHelpers = fs.readdirSync(widgetDir)
+      .filter((name) => /\.(?:coffee|js|jsx)$/.test(name) && !entryFiles.has(name));
+    assert.deepStrictEqual(standaloneHelpers, []);
   });
 
   console.log('\nParser');

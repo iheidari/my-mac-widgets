@@ -96,6 +96,7 @@ Each `widgets/<id>.widget/kit.jsx` is a **symlink** to `widget-kit/kit.jsx`; `de
 
 - Components defined in the kit work exactly as in-widget ones.
 - **Do not use JSX fragments** (`<>…</>`) anywhere in widgets or the kit — the fragment pragma resolves to `React.Fragment`, which is *not* global.
+- Put widget-local helper modules under `lib/` (or `src/`), never at the widget-folder root. Übersicht recursively treats every root `.coffee`, `.js`, and `.jsx` file as a standalone widget; a CommonJS helper there is wrapped as a legacy widget and fails with a misleading parse error.
 
 To verify a widget compiles without launching Übersicht, bundle it with Übersicht's own toolchain from `/Applications/Übersicht.app/Contents/Resources/node_modules` (browserify + babelify, presets `@babel/preset-env` targeting `last 4 Safari versions` and `@babel/preset-react` with `{pragma: 'html'}`).
 

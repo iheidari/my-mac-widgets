@@ -15,7 +15,7 @@ import {
   Offline,
   Message,
 } from "./kit.jsx";
-import { TITLE, presentAgentWidget } from "./view.js";
+import { TITLE, presentAgentWidget } from "./lib/view.js";
 
 export const command = statsCommand("claude-stats");
 
